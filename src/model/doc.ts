@@ -36,6 +36,7 @@ export function createDoc(opts: NewDocOptions = {}): CourseDoc {
     height,
     yardsPerPixel: ypp,
     background: opts.background ?? 'white',
+    colors: {},
     layers: [
       createRasterLayer('Base paint', width, height),
       createVectorLayer('Course shapes'),

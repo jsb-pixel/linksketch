@@ -2,6 +2,8 @@ import { Editor, isTyping, type ToolId } from './editor/editor';
 import { registerAllTools } from './editor/tools';
 import { createDoc, MAX_DOC_PIXELS } from './model/doc';
 import { deserialize, FILE_EXT, idbGet, idbSet, serialize } from './model/io';
+import { SURFACES, surfaceById, surfaceColor, surfaceColor2, type ColorMap } from './model/surfaces';
+import { THEMES } from './model/themes';
 import {
   buildInfoPanel,
   buildLayersPanel,
@@ -11,7 +13,9 @@ import {
   buildToolbox,
   dialog,
   field,
+  fromHex,
   h,
+  toHex,
 } from './ui/ui';
 
 const AUTOSAVE_KEY = 'autosave';
@@ -130,6 +134,82 @@ export class App {
         },
       },
       { label: 'Cancel', onClick: () => {} },
+    ]);
+  }
+
+  /** Pick a theme and tweak every golf surface's colors, with live preview. */
+  courseColorsDialog(): void {
+    const ed = this.ed;
+    const original: ColorMap = JSON.parse(JSON.stringify(ed.doc.colors));
+    let working: ColorMap = JSON.parse(JSON.stringify(original));
+    const golf = SURFACES.filter((s) => s.kind === 'golf');
+
+    const theme = h('select');
+    theme.append(h('option', { value: '', textContent: '— keep current —' }));
+    for (const t of THEMES) theme.append(h('option', { value: t.id, textContent: `${t.name} — ${t.description}` }));
+
+    const rows = h('div', { class: 'color-rows' });
+    const preview = () => {
+      ed.previewColors(JSON.parse(JSON.stringify(working)));
+      renderRows();
+    };
+    const renderRows = () => {
+      rows.replaceChildren(
+        ...golf.map((s) => {
+          const main = h('input', { type: 'color', value: toHex(surfaceColor(s.id)), title: 'Main color' });
+          main.addEventListener('input', () => {
+            working[s.id] = { ...working[s.id], color: fromHex(main.value) };
+            ed.previewColors(JSON.parse(JSON.stringify(working)));
+          });
+          const cells: (HTMLElement | string)[] = [h('span', { textContent: s.name }), main];
+          if (s.pattern !== 'none') {
+            const det = h('input', { type: 'color', value: toHex(surfaceColor2(s.id)), title: 'Pattern / detail color' });
+            det.addEventListener('input', () => {
+              working[s.id] = { color: working[s.id]?.color ?? surfaceColor(s.id), color2: fromHex(det.value) };
+              ed.previewColors(JSON.parse(JSON.stringify(working)));
+            });
+            cells.push(det);
+          } else cells.push(h('span'));
+          const reset = h('button', { class: 'small', textContent: 'Reset', title: 'Back to the default color' });
+          reset.disabled = !working[s.id];
+          reset.addEventListener('click', () => {
+            delete working[s.id];
+            preview();
+          });
+          cells.push(reset);
+          return h('div', { class: 'color-row' }, ...cells);
+        }),
+      );
+    };
+    theme.addEventListener('change', () => {
+      const t = THEMES.find((x) => x.id === theme.value);
+      if (!t) return;
+      // Themes replace golf colors but keep custom-slot colors.
+      const keep = Object.fromEntries(Object.entries(working).filter(([id]) => surfaceById(id)?.kind !== 'golf'));
+      working = { ...keep, ...JSON.parse(JSON.stringify(t.colors)) };
+      preview();
+    });
+    renderRows();
+
+    const body = h(
+      'div',
+      { class: 'form' },
+      field('Preset', theme),
+      h('div', { class: 'color-head' }, h('span', { textContent: 'Surface' }), h('span', { textContent: 'Color' }), h('span', { textContent: 'Detail' }), h('span')),
+      rows,
+      h('small', { textContent: 'Colors are saved with this course. Plain and custom colors: double‑click their swatch.' }),
+    );
+    dialog('Course colors', body, [
+      {
+        label: 'OK',
+        primary: true,
+        onClick: () => {
+          const final = working;
+          ed.previewColors(original); // so the undo step records the real "before"
+          ed.setColors(final, 'Change course colors', true);
+        },
+      },
+      { label: 'Cancel', onClick: () => ed.previewColors(original) },
     ]);
   }
 
@@ -259,6 +339,21 @@ export class App {
         ],
       },
       {
+        title: 'Colors',
+        items: [
+          { label: 'Course colors…', action: () => this.courseColorsDialog() },
+          ...THEMES.map((t) => ({
+            label: `    ${t.name}`,
+            action: () => {
+              const keep = Object.fromEntries(Object.entries(ed.doc.colors).filter(([id]) => surfaceById(id)?.kind !== 'golf'));
+              ed.setColors({ ...keep, ...JSON.parse(JSON.stringify(t.colors)) }, `Theme: ${t.name}`, true);
+            },
+          })),
+          { separator: true, label: '' },
+          { label: 'Swap left/right surfaces', shortcut: 'X', action: () => ed.swapSurfaces() },
+        ],
+      },
+      {
         title: 'View',
         items: [
           { label: 'Zoom in', shortcut: '⌘+', action: () => ed.zoomStep(1) },
@@ -266,23 +361,19 @@ export class App {
           { label: 'Zoom to fit', shortcut: '⌘0', action: () => ed.fit() },
           { label: 'Actual pixels', shortcut: '⌘1', action: () => ed.actualSize() },
           { separator: true, label: '' },
-          {
-            label: '100‑yard grid',
-            shortcut: '⌘\'',
-            checked: () => ed.showYardGrid,
-            action: () => {
-              ed.showYardGrid = !ed.showYardGrid;
-              ed.requestFrame();
-            },
-          },
-          {
-            label: 'Pixel grid (when zoomed in)',
-            checked: () => ed.showPixelGrid,
-            action: () => {
-              ed.showPixelGrid = !ed.showPixelGrid;
-              ed.requestFrame();
-            },
-          },
+          { label: 'Show yard grid', shortcut: '⌘\'', checked: () => ed.showYardGrid, action: () => ed.toggleYardGrid() },
+          ...([100, 50, 25] as const).map((n) => ({
+            label: `    Grid every ${n} yd`,
+            checked: () => ed.showYardGrid && ed.yardGridSize === n,
+            action: () => ed.setYardGrid(n),
+          })),
+          { separator: true, label: '' },
+          ...[4, 8, 12, 16].map((z) => ({
+            label: `Pixel grid from ${z * 100}% zoom`,
+            checked: () => ed.pixelGridZoom === z,
+            action: () => ed.setPixelGridZoom(z),
+          })),
+          { label: 'Pixel grid off', checked: () => ed.pixelGridZoom === 0, action: () => ed.setPixelGridZoom(0) },
         ],
       },
       {
@@ -313,10 +404,7 @@ export class App {
           '=': () => ed.zoomStep(1),
           '+': () => ed.zoomStep(1),
           '-': () => ed.zoomStep(-1),
-          "'": () => {
-            ed.showYardGrid = !ed.showYardGrid;
-            ed.requestFrame();
-          },
+          "'": () => ed.toggleYardGrid(),
         };
         if (map[k]) {
           e.preventDefault();

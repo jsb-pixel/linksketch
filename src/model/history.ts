@@ -1,5 +1,8 @@
 import type { CourseDoc, Feature, Layer, RasterLayer, Rect, VectorLayer } from './types';
 import { rectUnion } from '../geom/geom';
+import type { ColorMap } from './surfaces';
+
+const cloneColors = (c: ColorMap): ColorMap => JSON.parse(JSON.stringify(c));
 
 interface VectorChange {
   layer: VectorLayer;
@@ -17,6 +20,7 @@ interface Entry {
   vector: VectorChange[];
   raster: RasterChange[];
   layers?: { before: Layer[]; after: Layer[] };
+  colors?: { before: ColorMap; after: ColorMap };
 }
 
 interface Pending {
@@ -24,6 +28,7 @@ interface Pending {
   vector: Map<VectorLayer, Feature[]>;
   raster: Map<RasterLayer, { copy: Uint8Array; dirty: Rect | null }>;
   layers?: Layer[];
+  colors?: ColorMap;
 }
 
 const cloneFeatures = (fs: Feature[]): Feature[] => fs.map((f) => ({ ...f }));
@@ -88,6 +93,11 @@ export class History {
     if (e) e.dirty = rectUnion(e.dirty, r);
   }
 
+  snapshotColors(): void {
+    const p = this.need();
+    if (!p.colors) p.colors = cloneColors(this.doc.colors);
+  }
+
   snapshotLayers(): void {
     const p = this.need();
     if (!p.layers) p.layers = this.doc.layers.slice();
@@ -123,7 +133,10 @@ export class History {
         entry.layers = { before: p.layers, after };
       }
     }
-    if (!entry.vector.length && !entry.raster.length && !entry.layers) return false;
+    if (p.colors && JSON.stringify(p.colors) !== JSON.stringify(this.doc.colors)) {
+      entry.colors = { before: p.colors, after: cloneColors(this.doc.colors) };
+    }
+    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors) return false;
     this.undoStack.push(entry);
     if (this.undoStack.length > this.limit) this.undoStack.shift();
     this.redoStack.length = 0;
@@ -139,6 +152,7 @@ export class History {
     for (const [layer, before] of p.vector) layer.features = cloneFeatures(before);
     for (const [layer, { copy }] of p.raster) layer.pixels.set(copy);
     if (p.layers) this.doc.layers = p.layers.slice();
+    if (p.colors) this.doc.colors = cloneColors(p.colors);
   }
 
   undo(): boolean {
@@ -168,6 +182,7 @@ export class History {
 
   private apply(e: Entry, side: 'before' | 'after'): void {
     if (e.layers) this.doc.layers = e.layers[side].slice();
+    if (e.colors) this.doc.colors = cloneColors(e.colors[side]);
     for (const v of e.vector) v.layer.features = cloneFeatures(v[side]);
     for (const r of e.raster) writeRect(r.layer.pixels, this.doc.width, r.rect, r[side]);
   }

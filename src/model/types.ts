@@ -1,3 +1,5 @@
+import type { ColorMap } from './surfaces';
+
 /** A point. Units depend on context: "world" points are yards, "px" points are doc pixels. */
 export interface Vec2 {
   x: number;
@@ -61,6 +63,8 @@ export interface CourseDoc {
   yardsPerPixel: number;
   /** Surface id used for the empty background. */
   background: string;
+  /** Course color overrides (themes, custom colors). */
+  colors: ColorMap;
   /** Bottom → top. */
   layers: Layer[];
   holes: Hole[];

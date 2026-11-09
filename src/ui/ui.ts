@@ -1,7 +1,7 @@
 import { polygonArea, pathLength } from '../geom/geom';
 import type { Editor, ToolId } from '../editor/editor';
 import { createRasterLayer, createVectorLayer } from '../model/doc';
-import { SURFACES, surfaceById, surfaceCode, surfacePixel, rgbCss } from '../model/surfaces';
+import { SURFACES, customSlotUsed, surfaceById, surfaceCode, surfaceColor, surfacePixel, rgbCss } from '../model/surfaces';
 import { flatten } from '../render/raster';
 import { TOOL_ICONS } from './icons';
 
@@ -167,13 +167,29 @@ export function buildToolbox(ed: Editor): void {
 // =====================================================================
 // Palette (surfaces)
 // =====================================================================
+export const toHex = (c: readonly number[]) => `#${c.map((n) => n.toString(16).padStart(2, '0')).join('')}`;
+export const fromHex = (hex: string): [number, number, number] => [
+  parseInt(hex.slice(1, 3), 16),
+  parseInt(hex.slice(3, 5), 16),
+  parseInt(hex.slice(5, 7), 16),
+];
+
 function swatchCanvas(id: string, size = 16): HTMLCanvasElement {
   const c = h('canvas', { width: size, height: size });
   const ctx = c.getContext('2d')!;
+  const s = surfaceById(id)!;
+  if (s.kind === 'custom' && !customSlotUsed(id)) {
+    // empty slot: light checkerboard
+    for (let y = 0; y < size; y += 4)
+      for (let x = 0; x < size; x += 4) {
+        ctx.fillStyle = (x + y) % 8 ? '#ffffff' : '#d8d8d8';
+        ctx.fillRect(x, y, 4, 4);
+      }
+    return c;
+  }
   const img = ctx.createImageData(size, size);
   const u32 = new Uint32Array(img.data.buffer);
   const code = surfaceCode(id);
-  const s = surfaceById(id)!;
   for (let y = 0; y < size; y++)
     for (let x = 0; x < size; x++) {
       const edge = s.outline && (x === 0 || y === 0 || x === size - 1 || y === size - 1);
@@ -183,28 +199,66 @@ function swatchCanvas(id: string, size = 16): HTMLCanvasElement {
   return c;
 }
 
+/** Open the system color picker next to `anchor`; calls onPick with the chosen color. */
+export function pickColor(anchor: HTMLElement, initial: readonly number[], onPick: (rgb: [number, number, number]) => void, onLive?: (rgb: [number, number, number]) => void): void {
+  const input = h('input', { type: 'color', value: toHex(initial) });
+  const r = anchor.getBoundingClientRect();
+  Object.assign(input.style, { position: 'fixed', left: `${r.left}px`, top: `${r.top}px`, width: '1px', height: '1px', opacity: '0', border: '0', padding: '0' });
+  document.body.append(input);
+  if (onLive) input.addEventListener('input', () => onLive(fromHex(input.value)));
+  input.addEventListener('change', () => {
+    onPick(fromHex(input.value));
+    input.remove();
+  });
+  input.addEventListener('blur', () => setTimeout(() => input.remove(), 500));
+  input.click();
+}
+
 export function buildPalette(ed: Editor): void {
   const pal = $('#palette');
-  const current = h('div', { class: 'current', title: 'Left‑click / right‑click surfaces · click to swap (X)' });
+  const current = h('div', { class: 'current', title: 'Left / right surfaces · click to swap (X)' });
   const currentName = h('div', { class: 'current-name' });
   current.addEventListener('click', () => ed.swapSurfaces());
   const golfRow = h('div', { class: 'swatches golf' });
   const colorRow = h('div', { class: 'swatches colors' });
-  const all = new Map<string, HTMLElement>();
+  const customRow = h('div', { class: 'swatches custom', title: 'Custom colors — click an empty box to choose a color, double‑click to change it' });
+  const all = new Map<string, HTMLButtonElement>();
+
+  const editColor = (id: string, b: HTMLElement, thenSelect: boolean) =>
+    pickColor(b, surfaceColor(id), (rgb) => {
+      const old = ed.doc.colors[id];
+      ed.setColors({ [id]: { ...old, color: rgb } }, `Color: ${surfaceById(id)!.name}`);
+      if (thenSelect) ed.setSurface(id);
+    });
+
   for (const s of SURFACES) {
-    const b = h('button', { class: 'swatch', title: s.name });
-    b.append(swatchCanvas(s.id));
-    if (s.kind === 'golf') b.append(h('span', { class: 'swatch-label', textContent: s.name.split(' ')[0] }));
-    b.title = `${s.name} — click: left surface · right‑click: right surface`;
-    b.addEventListener('click', () => ed.setSurface(s.id));
+    const b = h('button', { class: 'swatch' });
+    b.addEventListener('click', () => {
+      if (s.kind === 'custom' && !customSlotUsed(s.id)) return editColor(s.id, b, true);
+      ed.setSurface(s.id);
+    });
+    b.addEventListener('dblclick', () => editColor(s.id, b, false));
     b.addEventListener('contextmenu', (e) => {
       e.preventDefault();
+      if (s.kind === 'custom' && !customSlotUsed(s.id)) return;
       ed.setSurface(s.id, true);
     });
     all.set(s.id, b);
-    (s.kind === 'golf' ? golfRow : colorRow).append(b);
+    (s.kind === 'golf' ? golfRow : s.kind === 'color' ? colorRow : customRow).append(b);
   }
-  pal.append(h('div', { class: 'current-wrap' }, current, currentName), golfRow, colorRow);
+  pal.append(h('div', { class: 'current-wrap' }, current, currentName), golfRow, colorRow, customRow);
+
+  const renderSwatches = () =>
+    all.forEach((b, id) => {
+      const s = surfaceById(id)!;
+      const empty = s.kind === 'custom' && !customSlotUsed(id);
+      b.replaceChildren(swatchCanvas(id));
+      if (s.kind === 'golf') b.append(h('span', { class: 'swatch-label', textContent: s.name.split(' ')[0] }));
+      b.title = empty
+        ? `${s.name} (empty) — click to choose a color`
+        : `${s.name} — click: left · right‑click: right · double‑click: change color`;
+    });
+
   const sync = () => {
     const fg = swatchCanvas(ed.surface, 22);
     fg.className = 'fg';
@@ -221,6 +275,11 @@ export function buildPalette(ed: Editor): void {
     });
   };
   ed.on('surface', sync);
+  ed.on('palette', () => {
+    renderSwatches();
+    sync();
+  });
+  renderSwatches();
   sync();
 }
 
@@ -484,7 +543,11 @@ export function dialog(title: string, content: HTMLElement, buttons: { label: st
   }
   overlay.append(win);
   overlay.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape') {
+      const cancel = buttons.find((b) => /cancel|close/i.test(b.label));
+      cancel?.onClick();
+      close();
+    }
     if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'BUTTON') {
       const primary = buttons.find((b) => b.primary);
       if (primary && primary.onClick() !== false) close();

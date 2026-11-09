@@ -561,3 +561,47 @@ kbd {
 .about p {
   margin: 0 0 8px;
 }
+
+.swatches.custom {
+  display: grid;
+  grid-template-columns: repeat(3, 18px);
+  gap: 2px;
+  padding-left: 6px;
+  border-left: 1px solid var(--shadow);
+  box-shadow: -1px 0 var(--light);
+}
+.swatches.custom .swatch {
+  width: 18px;
+  height: 18px;
+  padding: 1px;
+}
+.swatches.custom .swatch canvas {
+  width: 14px;
+  height: 14px;
+}
+
+.color-head,
+.color-row {
+  display: grid;
+  grid-template-columns: 1fr 48px 48px 56px;
+  align-items: center;
+  gap: 6px;
+}
+.color-head {
+  font-weight: bold;
+  border-bottom: 1px solid var(--shadow);
+}
+.color-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.color-row input[type='color'] {
+  width: 44px;
+  height: 20px;
+  padding: 1px;
+}
+button:disabled {
+  color: var(--shadow);
+  text-shadow: 1px 1px var(--light);
+}

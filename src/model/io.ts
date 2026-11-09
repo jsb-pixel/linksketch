@@ -2,7 +2,7 @@
  * File format (.fairway): JSON. Raster layers are run‑length encoded + base64.
  * The file carries its own surface table so palette reordering never corrupts files.
  */
-import { SURFACES, surfaceCode } from './surfaces';
+import { SURFACES, surfaceCode, type ColorMap, type RGB } from './surfaces';
 import type { CourseDoc, Layer } from './types';
 
 export const FILE_EXT = '.fairway';
@@ -58,6 +58,7 @@ export function serialize(doc: CourseDoc): string {
     height: doc.height,
     yardsPerPixel: doc.yardsPerPixel,
     background: doc.background,
+    colors: doc.colors,
     surfaceTable: SURFACES.map((s) => s.id),
     layers: doc.layers.map((l) => {
       const base = { id: l.id, name: l.name, visible: l.visible, locked: l.locked, kind: l.kind };
@@ -115,10 +116,29 @@ export function deserialize(text: string): CourseDoc {
     height: H,
     yardsPerPixel: +j.yardsPerPixel || 1,
     background: String(j.background ?? 'white'),
+    colors: parseColors(j.colors),
     layers,
     holes: Array.isArray(j.holes) ? j.holes : [],
   };
 }
+
+function parseColors(c: unknown): ColorMap {
+  const out: ColorMap = {};
+  if (!c || typeof c !== 'object') return out;
+  const rgb = (v: unknown): RGB | undefined =>
+    Array.isArray(v) && v.length === 3 && v.every((n) => Number.isFinite(n))
+      ? [clamp(v[0]), clamp(v[1]), clamp(v[2])]
+      : undefined;
+  for (const [id, val] of Object.entries(c as Record<string, { color?: unknown; color2?: unknown }>)) {
+    if (!surfaceCode(id)) continue;
+    const color = rgb(val?.color);
+    if (!color) continue;
+    const color2 = rgb(val?.color2);
+    out[id] = color2 ? { color, color2 } : { color };
+  }
+  return out;
+}
+const clamp = (n: number) => Math.max(0, Math.min(255, Math.round(n)));
 
 // ---------- autosave (IndexedDB) ----------
 const DB = 'fairway-paint';

@@ -1,6 +1,6 @@
 import { dedupe, dist, pathLength, simplifyClosed } from '../geom/geom';
 import { uid } from '../model/doc';
-import { rgbCss, surfaceById, surfaceCode } from '../model/surfaces';
+import { rgbCss, surfaceCode, surfaceColor } from '../model/surfaces';
 import type { Feature, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
 import { flatten, visibleCodes } from '../render/raster';
 import { floodRegion, forEachPixel } from '../render/regions';
@@ -322,7 +322,7 @@ export class FreehandShapeTool implements Tool {
     ctx.strokeStyle = '#000';
     ctx.lineWidth = 3;
     ctx.stroke();
-    ctx.strokeStyle = rgbCss(surfaceById(this.ed.surface)!.color);
+    ctx.strokeStyle = rgbCss(surfaceColor(this.ed.surface));
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.setLineDash([3, 3]);

@@ -12,7 +12,7 @@ export type Pattern = 'none' | 'water' | 'speckle' | 'trees' | 'dots';
 export interface Surface {
   id: string;
   name: string;
-  kind: 'golf' | 'color';
+  kind: 'golf' | 'color' | 'custom';
   color: RGB;
   color2?: RGB;
   pattern: Pattern;
@@ -72,6 +72,20 @@ export const SURFACES: readonly Surface[] = [
   plain('purple', 'Purple', [128, 0, 128]),
 ];
 
+/** Number of user‑defined color slots. */
+export const CUSTOM_SLOTS = 6;
+const CUSTOM: Surface[] = Array.from({ length: CUSTOM_SLOTS }, (_, i) => ({
+  id: `custom${i + 1}`,
+  name: `Custom ${i + 1}`,
+  kind: 'custom',
+  color: [255, 255, 255],
+  pattern: 'none',
+  outline: false,
+  priority: 80,
+}));
+// Appended so existing surface codes never shift.
+(SURFACES as Surface[]).push(...CUSTOM);
+
 export const OUTLINE_RGB: RGB = [0, 0, 0];
 
 /** surface id → code (1‑based; 0 means "nothing"). */
@@ -105,11 +119,41 @@ const C1 = new Uint32Array(SURFACES.length + 1);
 const C2 = new Uint32Array(SURFACES.length + 1);
 const PAT = new Uint8Array(SURFACES.length + 1);
 const PATTERN_IDS: Record<Pattern, number> = { none: 0, water: 1, speckle: 2, trees: 3, dots: 4 };
-SURFACES.forEach((s, i) => {
-  C1[i + 1] = pack(...s.color);
-  C2[i + 1] = pack(...(s.color2 ?? s.color));
-  PAT[i + 1] = PATTERN_IDS[s.pattern];
-});
+SURFACES.forEach((s, i) => (PAT[i + 1] = PATTERN_IDS[s.pattern]));
+
+// ---------------------------------------------------------------- course colors
+/** Per‑course color override for one surface. */
+export interface SurfaceColors {
+  color: RGB;
+  color2?: RGB;
+}
+export type ColorMap = Record<string, SurfaceColors>;
+
+let overrides: ColorMap = {};
+
+/** Effective main color (course override or default). */
+export function surfaceColor(id: string): RGB {
+  return overrides[id]?.color ?? surfaceById(id)?.color ?? [255, 0, 255];
+}
+/** Effective pattern/detail color. */
+export function surfaceColor2(id: string): RGB {
+  const s = surfaceById(id);
+  return overrides[id]?.color2 ?? (overrides[id] && !s?.color2 ? overrides[id].color : s?.color2 ?? surfaceColor(id));
+}
+/** Has a custom slot been given a color in this course? */
+export function customSlotUsed(id: string): boolean {
+  return !!overrides[id];
+}
+
+/** Install a course's colors into the render tables. */
+export function applyColors(map: ColorMap): void {
+  overrides = map;
+  SURFACES.forEach((s, i) => {
+    C1[i + 1] = pack(...surfaceColor(s.id));
+    C2[i + 1] = pack(...surfaceColor2(s.id));
+  });
+}
+applyColors({});
 export const OUTLINE_PACKED = pack(...OUTLINE_RGB);
 
 /** Deterministic per‑pixel hash so patterns never "swim" when re-rendered. */

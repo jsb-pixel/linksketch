@@ -5,7 +5,7 @@ import { surfaceByCode, surfaceById } from '../model/surfaces';
 import type { CourseDoc, Feature, Layer, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
 import { featureContains, flatten, renderRegion, sortedFeatures } from '../render/raster';
 import { forEachPixel, regionEdges, traceOutline, type Region } from '../render/regions';
-import { surfaceCode } from '../model/surfaces';
+import { applyColors, surfaceCode, type ColorMap, type SurfaceColors } from '../model/surfaces';
 import { uid } from '../model/doc';
 
 export type ToolId =
@@ -75,7 +75,7 @@ export interface PixelSelection extends Region {
   edges: [number, number, number, number][];
 }
 
-export type EditorEvent = 'doc' | 'selection' | 'tool' | 'surface' | 'view' | 'status' | 'history' | 'options';
+export type EditorEvent = 'palette' | 'doc' | 'selection' | 'tool' | 'surface' | 'view' | 'status' | 'history' | 'options';
 
 export interface Ruler {
   points: Vec2[];
@@ -108,8 +108,11 @@ export class Editor {
   surface2 = 'rough';
   brushSize = 3;
   smoothShapes = true;
+  // View preferences (remembered in this browser).
   showYardGrid = false;
-  showPixelGrid = true;
+  yardGridSize: 25 | 50 | 100 = 100;
+  /** Zoom at which the pixel grid appears; 0 = never. */
+  pixelGridZoom = 8;
 
   activeLayerId: string | null = null;
   selection: Selection | null = null;
@@ -134,6 +137,7 @@ export class Editor {
   constructor(readonly canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d')!;
     this.docCtx = this.docCanvas.getContext('2d', { willReadFrequently: false })!;
+    this.loadViewPrefs();
     this.bindEvents();
   }
 
@@ -156,10 +160,13 @@ export class Editor {
     this.doc = doc;
     this.history = new History(doc);
     this.history.onChange = () => {
+      this.syncColors();
       this.validateSelection();
       this.validateRegion();
       this.emit('history', 'doc', 'selection');
     };
+    this.appliedColors = '';
+    this.syncColors();
     this.docCanvas.width = doc.width;
     this.docCanvas.height = doc.height;
     this.selection = null;
@@ -395,6 +402,41 @@ export class Editor {
     this.emit('surface');
   }
 
+  private appliedColors = '';
+
+  /** Install the course's colors if they changed; re-render everything. */
+  syncColors(): void {
+    const key = JSON.stringify(this.doc.colors);
+    if (key === this.appliedColors) return;
+    this.appliedColors = key;
+    applyColors(this.doc.colors);
+    this.invalidate();
+    this.emit('palette');
+  }
+
+  /**
+   * Change course colors as one undo step. `null` resets a surface to its default.
+   * Pass replace=true to start from an empty map (applying a theme).
+   */
+  setColors(changes: Record<string, SurfaceColors | null>, label: string, replace = false): void {
+    this.history.begin(label);
+    this.history.snapshotColors();
+    const next: ColorMap = replace ? {} : { ...this.doc.colors };
+    for (const [id, v] of Object.entries(changes)) {
+      if (v) next[id] = v;
+      else delete next[id];
+    }
+    this.doc.colors = next;
+    this.history.commit();
+    this.syncColors();
+  }
+
+  /** Live preview without recording history (dialogs call setColors to commit). */
+  previewColors(map: ColorMap): void {
+    this.doc.colors = map;
+    this.syncColors();
+  }
+
   setBrushSize(n: number): void {
     this.brushSize = Math.max(1, Math.min(40, Math.round(n)));
     this.emit('options');
@@ -558,13 +600,50 @@ export class Editor {
     ctx.imageSmoothingQuality = 'medium';
     ctx.drawImage(this.docCanvas, x, y, W, H);
 
-    if (this.showPixelGrid && this.zoom >= 10) this.drawGrid(1, 'rgba(0,0,0,0.12)');
-    if (this.showYardGrid) this.drawGrid(100 / this.doc.yardsPerPixel, 'rgba(0,0,0,0.35)', true);
+    if (this.pixelGridZoom && this.zoom >= this.pixelGridZoom) this.drawGrid(1, 'rgba(0,0,0,0.12)');
+    if (this.showYardGrid) this.drawGrid(this.yardGridSize / this.doc.yardsPerPixel, 'rgba(0,0,0,0.35)', true);
 
     this.drawSelection(ctx);
     this.drawRegion(ctx);
     this.drawRuler(ctx);
     this.tool.overlay?.(ctx);
+  }
+
+  setYardGrid(size: 0 | 25 | 50 | 100): void {
+    this.showYardGrid = size > 0;
+    if (size) this.yardGridSize = size;
+    this.saveViewPrefs();
+    this.requestFrame();
+  }
+
+  toggleYardGrid(): void {
+    this.setYardGrid(this.showYardGrid ? 0 : this.yardGridSize);
+  }
+
+  setPixelGridZoom(z: number): void {
+    this.pixelGridZoom = z;
+    this.saveViewPrefs();
+    this.requestFrame();
+  }
+
+  private loadViewPrefs(): void {
+    try {
+      const p = JSON.parse(localStorage.getItem('fairway-view') ?? '{}');
+      if (typeof p.showYardGrid === 'boolean') this.showYardGrid = p.showYardGrid;
+      if ([25, 50, 100].includes(p.yardGridSize)) this.yardGridSize = p.yardGridSize;
+      if (typeof p.pixelGridZoom === 'number') this.pixelGridZoom = p.pixelGridZoom;
+    } catch {
+      /* storage unavailable — use defaults */
+    }
+  }
+
+  private saveViewPrefs(): void {
+    try {
+      const { showYardGrid, yardGridSize, pixelGridZoom } = this;
+      localStorage.setItem('fairway-view', JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom }));
+    } catch {
+      /* ignore */
+    }
   }
 
   private drawGrid(stepPx: number, color: string, labels = false): void {
