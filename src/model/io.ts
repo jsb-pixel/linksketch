@@ -1,0 +1,156 @@
+/**
+ * File format (.fairway): JSON. Raster layers are run‑length encoded + base64.
+ * The file carries its own surface table so palette reordering never corrupts files.
+ */
+import { SURFACES, surfaceCode } from './surfaces';
+import type { CourseDoc, Layer } from './types';
+
+export const FILE_EXT = '.fairway';
+const FORMAT = 'fairway-paint';
+const VERSION = 1;
+
+// ---------- RLE (count:1..255, value) pairs ----------
+export function rleEncode(data: Uint8Array): Uint8Array {
+  const out: number[] = [];
+  let i = 0;
+  while (i < data.length) {
+    const v = data[i];
+    let run = 1;
+    while (run < 255 && i + run < data.length && data[i + run] === v) run++;
+    out.push(run, v);
+    i += run;
+  }
+  return Uint8Array.from(out);
+}
+
+export function rleDecode(rle: Uint8Array, length: number): Uint8Array {
+  const out = new Uint8Array(length);
+  let o = 0;
+  for (let i = 0; i + 1 < rle.length && o < length; i += 2) {
+    const n = Math.min(rle[i], length - o);
+    out.fill(rle[i + 1], o, o + n);
+    o += n;
+  }
+  return out;
+}
+
+export function toBase64(bytes: Uint8Array): string {
+  let s = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) s += String.fromCharCode(...bytes.subarray(i, i + CH));
+  return btoa(s);
+}
+
+export function fromBase64(b64: string): Uint8Array {
+  const s = atob(b64);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+// ---------- serialize ----------
+export function serialize(doc: CourseDoc): string {
+  return JSON.stringify({
+    format: FORMAT,
+    version: VERSION,
+    name: doc.name,
+    width: doc.width,
+    height: doc.height,
+    yardsPerPixel: doc.yardsPerPixel,
+    background: doc.background,
+    surfaceTable: SURFACES.map((s) => s.id),
+    layers: doc.layers.map((l) => {
+      const base = { id: l.id, name: l.name, visible: l.visible, locked: l.locked, kind: l.kind };
+      return l.kind === 'raster'
+        ? { ...base, outline: l.outline, rle: toBase64(rleEncode(l.pixels)) }
+        : {
+            ...base,
+            features: l.features.map((f) => ({
+              ...f,
+              points: f.points.map((p) => [round3(p.x), round3(p.y)]),
+            })),
+          };
+    }),
+    holes: doc.holes,
+  });
+}
+
+const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
+export function deserialize(text: string): CourseDoc {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const j: any = JSON.parse(text);
+  if (j?.format !== FORMAT) throw new Error('This is not a Fairway Paint course file.');
+  if (j.version > VERSION) throw new Error('This file was made with a newer version of Fairway Paint.');
+  const W = j.width | 0;
+  const H = j.height | 0;
+  if (W <= 0 || H <= 0) throw new Error('Invalid course size.');
+  // Map file surface codes → current codes.
+  const table: string[] = j.surfaceTable ?? [];
+  const remap = new Uint8Array(256);
+  table.forEach((id, i) => (remap[i + 1] = surfaceCode(id)));
+
+  const layers: Layer[] = (j.layers ?? []).map((l: any): Layer => {
+    const base = { id: String(l.id), name: String(l.name), visible: !!l.visible, locked: !!l.locked };
+    if (l.kind === 'raster') {
+      const px = rleDecode(fromBase64(l.rle ?? ''), W * H);
+      for (let i = 0; i < px.length; i++) if (px[i]) px[i] = remap[px[i]];
+      return { ...base, kind: 'raster', outline: l.outline ?? true, pixels: px };
+    }
+    return {
+      ...base,
+      kind: 'vector',
+      features: (l.features ?? []).map((f: any) => ({
+        id: String(f.id),
+        surface: String(f.surface),
+        smooth: !!f.smooth,
+        points: (f.points ?? []).map((p: [number, number]) => ({ x: +p[0], y: +p[1] })),
+      })),
+    };
+  });
+
+  return {
+    name: String(j.name ?? 'Untitled course'),
+    width: W,
+    height: H,
+    yardsPerPixel: +j.yardsPerPixel || 1,
+    background: String(j.background ?? 'white'),
+    layers,
+    holes: Array.isArray(j.holes) ? j.holes : [],
+  };
+}
+
+// ---------- autosave (IndexedDB) ----------
+const DB = 'fairway-paint';
+const STORE = 'kv';
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function idbSet(key: string, value: unknown): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+export async function idbGet<T>(key: string): Promise<T | undefined> {
+  const db = await openDb();
+  const v = await new Promise<T | undefined>((resolve, reject) => {
+    const req = db.transaction(STORE, 'readonly').objectStore(STORE).get(key);
+    req.onsuccess = () => resolve(req.result as T | undefined);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return v;
+}

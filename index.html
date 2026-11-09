@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Fairway Paint</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="menubar"></div>
+      <div id="main">
+        <div id="left" class="chrome">
+          <div id="toolbox"></div>
+          <div id="tool-options"></div>
+        </div>
+        <div id="workspace"><canvas id="view" tabindex="0"></canvas></div>
+        <div id="right" class="chrome">
+          <div class="panel" id="layers-panel"></div>
+          <div class="panel" id="info-panel"></div>
+        </div>
+      </div>
+      <div id="palette" class="chrome"></div>
+      <div id="statusbar"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
