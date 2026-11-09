@@ -43,14 +43,39 @@ export interface VectorLayer extends LayerBase {
   features: Feature[];
 }
 
-export type Layer = RasterLayer | VectorLayer;
+/** Where an underlay image sits in the course, plus how it is shown. */
+export interface ImagePlacement {
+  /** Top‑left corner of the image, in yards. */
+  x: number;
+  y: number;
+  /** Yards per image pixel. */
+  scale: number;
+  /** Clockwise rotation in degrees, about the top‑left corner. */
+  rotation: number;
+  /** 0–1. */
+  opacity: number;
+  /** Draw above the drawing (to check alignment) instead of under it. */
+  above: boolean;
+}
 
-/** Reserved for v0.2 (hole tool / yardages). */
+/** A reference picture (satellite screenshot, scanned plan) to trace over. */
+export interface ImageLayer extends LayerBase, ImagePlacement {
+  kind: 'image';
+  /** Image data URL. */
+  src: string;
+  imgW: number;
+  imgH: number;
+}
+
+export type Layer = RasterLayer | VectorLayer | ImageLayer;
+export type DrawingLayer = RasterLayer | VectorLayer;
+
+/** A golf hole: its line of play from tee through aim points to the green. */
 export interface Hole {
   id: string;
   number: number;
   par: number;
-  /** Tee → aim points → green center, in yards. */
+  /** Tee → aim points → green center, in yards. Immutable: replace, don't mutate. */
   points: Vec2[];
 }
 

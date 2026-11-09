@@ -605,3 +605,42 @@ button:disabled {
   color: var(--shadow);
   text-shadow: 1px 1px var(--light);
 }
+
+input.num,
+select.num {
+  width: 64px;
+}
+.kv input[type='range'] {
+  width: 110px;
+}
+.scorecard table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+}
+.scorecard th,
+.scorecard td {
+  border: 1px solid var(--shadow);
+  padding: 1px 4px;
+  text-align: right;
+}
+.scorecard th:first-child,
+.scorecard td:first-child {
+  text-align: left;
+}
+.scorecard tr.total td {
+  font-weight: bold;
+  background: #eee;
+}
+.scorecard tr.sel td {
+  background: var(--hl);
+  color: #fff;
+}
+.scorecard tr:not(.total) {
+  cursor: pointer;
+}
+
+#workspace.drop {
+  outline: 3px dashed #0a64ff;
+  outline-offset: -6px;
+}

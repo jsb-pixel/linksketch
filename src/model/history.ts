@@ -1,8 +1,19 @@
-import type { CourseDoc, Feature, Layer, RasterLayer, Rect, VectorLayer } from './types';
+import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, RasterLayer, Rect, VectorLayer } from './types';
 import { rectUnion } from '../geom/geom';
 import type { ColorMap } from './surfaces';
 
 const cloneColors = (c: ColorMap): ColorMap => JSON.parse(JSON.stringify(c));
+const cloneHoles = (hs: Hole[]): Hole[] => hs.map((h) => ({ ...h }));
+const placementOf = (l: ImageLayer): ImagePlacement => ({
+  x: l.x,
+  y: l.y,
+  scale: l.scale,
+  rotation: l.rotation,
+  opacity: l.opacity,
+  above: l.above,
+});
+const samePlacement = (a: ImagePlacement, b: ImagePlacement) =>
+  (Object.keys(a) as (keyof ImagePlacement)[]).every((k) => a[k] === b[k]);
 
 interface VectorChange {
   layer: VectorLayer;
@@ -21,6 +32,8 @@ interface Entry {
   raster: RasterChange[];
   layers?: { before: Layer[]; after: Layer[] };
   colors?: { before: ColorMap; after: ColorMap };
+  holes?: { before: Hole[]; after: Hole[] };
+  images: { layer: ImageLayer; before: ImagePlacement; after: ImagePlacement }[];
 }
 
 interface Pending {
@@ -29,6 +42,8 @@ interface Pending {
   raster: Map<RasterLayer, { copy: Uint8Array; dirty: Rect | null }>;
   layers?: Layer[];
   colors?: ColorMap;
+  holes?: Hole[];
+  images: Map<ImageLayer, ImagePlacement>;
 }
 
 const cloneFeatures = (fs: Feature[]): Feature[] => fs.map((f) => ({ ...f }));
@@ -74,7 +89,7 @@ export class History {
 
   begin(label: string): void {
     if (this.pending) this.commit();
-    this.pending = { label, vector: new Map(), raster: new Map() };
+    this.pending = { label, vector: new Map(), raster: new Map(), images: new Map() };
   }
 
   snapshotVector(layer: VectorLayer): void {
@@ -98,6 +113,16 @@ export class History {
     if (!p.colors) p.colors = cloneColors(this.doc.colors);
   }
 
+  snapshotHoles(): void {
+    const p = this.need();
+    if (!p.holes) p.holes = cloneHoles(this.doc.holes);
+  }
+
+  snapshotImage(layer: ImageLayer): void {
+    const p = this.need();
+    if (!p.images.has(layer)) p.images.set(layer, placementOf(layer));
+  }
+
   snapshotLayers(): void {
     const p = this.need();
     if (!p.layers) p.layers = this.doc.layers.slice();
@@ -108,7 +133,7 @@ export class History {
     const p = this.pending;
     if (!p) return false;
     this.pending = null;
-    const entry: Entry = { label: p.label, vector: [], raster: [] };
+    const entry: Entry = { label: p.label, vector: [], raster: [], images: [] };
     for (const [layer, before] of p.vector) {
       const changed =
         before.length !== layer.features.length ||
@@ -136,7 +161,22 @@ export class History {
     if (p.colors && JSON.stringify(p.colors) !== JSON.stringify(this.doc.colors)) {
       entry.colors = { before: p.colors, after: cloneColors(this.doc.colors) };
     }
-    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors) return false;
+    if (p.holes) {
+      const now = this.doc.holes;
+      const changed =
+        p.holes.length !== now.length ||
+        p.holes.some((h, i) => {
+          const g = now[i];
+          return h.id !== g.id || h.points !== g.points || h.par !== g.par || h.number !== g.number;
+        });
+      if (changed) entry.holes = { before: p.holes, after: cloneHoles(now) };
+    }
+    for (const [layer, before] of p.images) {
+      const after = placementOf(layer);
+      if (!samePlacement(before, after)) entry.images.push({ layer, before, after });
+    }
+    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors && !entry.holes && !entry.images.length)
+      return false;
     this.undoStack.push(entry);
     if (this.undoStack.length > this.limit) this.undoStack.shift();
     this.redoStack.length = 0;
@@ -153,6 +193,8 @@ export class History {
     for (const [layer, { copy }] of p.raster) layer.pixels.set(copy);
     if (p.layers) this.doc.layers = p.layers.slice();
     if (p.colors) this.doc.colors = cloneColors(p.colors);
+    if (p.holes) this.doc.holes = cloneHoles(p.holes);
+    for (const [layer, before] of p.images) Object.assign(layer, before);
   }
 
   undo(): boolean {
@@ -183,6 +225,8 @@ export class History {
   private apply(e: Entry, side: 'before' | 'after'): void {
     if (e.layers) this.doc.layers = e.layers[side].slice();
     if (e.colors) this.doc.colors = cloneColors(e.colors[side]);
+    if (e.holes) this.doc.holes = cloneHoles(e.holes[side]);
+    for (const im of e.images) Object.assign(im.layer, im[side]);
     for (const v of e.vector) v.layer.features = cloneFeatures(v[side]);
     for (const r of e.raster) writeRect(r.layer.pixels, this.doc.width, r.rect, r[side]);
   }

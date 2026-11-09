@@ -139,7 +139,11 @@ Active surface is shown like Paint's fg/bg swatch.
 - **v0.1.x polish backlog** — Add‑to / cut‑from shape (⇧/⌥ + freehand, boolean ops:
   bite a bunker out of a fairway); Trace (painted pixels → shape); rectangle & ellipse
   shape tools; selection marquee for painted pixels; app icon + offline PWA.
-- **v0.2 Holes & yardage** — Hole tool (tee → aim points → green), par, auto
+- **v0.2 Holes & yardage** ✅ built 2026‑11‑09: underlay layer (import/drop/⌘V paste, opacity,
+  rotation, move tool U, set‑scale tool K, never exported); Hole tool O (tee → aim points →
+  green, par guess, drag/insert/delete points, 3–6 sets par); scorecard Out/In/Total;
+  distance arcs from tee 150–300 and to green 50–200; holes included in PNG export.
+  Original v0.2 plan: — Hole tool (tee → aim points → green), par, auto
   yardage along centerline, distance arcs, scorecard panel; image underlay with
   opacity and "set scale by known distance".
 - **v0.3 Real land** — place a document on a map (US); satellite underlay

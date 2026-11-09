@@ -2,13 +2,17 @@ import { Editor, isTyping, type ToolId } from './editor/editor';
 import { registerAllTools } from './editor/tools';
 import { createDoc, MAX_DOC_PIXELS } from './model/doc';
 import { deserialize, FILE_EXT, idbGet, idbSet, serialize } from './model/io';
-import { SURFACES, surfaceById, surfaceColor, surfaceColor2, type ColorMap } from './model/surfaces';
+import { SURFACES, rgbCss, surfaceById, surfaceColor, surfaceColor2, type ColorMap } from './model/surfaces';
+import { createImageLayer } from './model/doc';
+import { drawHoles } from './editor/holes';
+import { loadImageBlob } from './editor/underlay';
 import { THEMES } from './model/themes';
 import {
   buildInfoPanel,
   buildLayersPanel,
   buildMenuBar,
   buildPalette,
+  buildScorecard,
   buildStatusBar,
   buildToolbox,
   dialog,
@@ -52,6 +56,8 @@ export class App {
     buildLayersPanel(this.ed);
     buildInfoPanel(this.ed);
     buildStatusBar(this.ed);
+    buildScorecard(this.ed);
+    this.bindImageInput();
     this.bindKeys();
 
     this.ed.on('history', () => {
@@ -213,6 +219,88 @@ export class App {
     ]);
   }
 
+  // ------------------------------------------------------------ underlay import
+  async importImage(blob: Blob): Promise<void> {
+    const ed = this.ed;
+    try {
+      const { src, w, h: hgt } = await loadImageBlob(blob);
+      const k = ed.doc.yardsPerPixel;
+      const docW = ed.doc.width * k;
+      const docH = ed.doc.height * k;
+      const v = ed.visibleWorld();
+      const x0 = Math.max(0, v.x);
+      const y0 = Math.max(0, v.y);
+      const vw = Math.min(docW, v.x + v.w) - x0;
+      const vh = Math.min(docH, v.y + v.h) - y0;
+      const scale = Math.min((vw * 0.9) / w, (vh * 0.9) / hgt);
+      const layer = createImageLayer(`Underlay ${ed.doc.layers.filter((l) => l.kind === 'image').length + 1}`, src, w, hgt, {
+        scale,
+        x: x0 + (vw - w * scale) / 2,
+        y: y0 + (vh - hgt * scale) / 2,
+      });
+      ed.history.begin('Import underlay');
+      ed.history.snapshotLayers();
+      ed.doc.layers = [layer, ...ed.doc.layers];
+      ed.history.commit();
+      ed.setActiveLayer(layer.id);
+      ed.setTool('scale');
+      ed.setMessage('Underlay added. Now click two points you know the distance between (Set scale), or press U to move it.');
+    } catch (err) {
+      alert(`Could not import image: ${(err as Error).message}`);
+    }
+  }
+
+  async importImageDialog(): Promise<void> {
+    try {
+      await this.importImage(await pickFile('image/*'));
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') alert((err as Error).message);
+    }
+  }
+
+  /** Paste (⌘V) a screenshot or drop an image file onto the canvas. */
+  private bindImageInput(): void {
+    window.addEventListener('paste', (e) => {
+      if (isTyping(e)) return;
+      const item = [...(e.clipboardData?.items ?? [])].find((i) => i.type.startsWith('image/'));
+      const file = item?.getAsFile();
+      if (file) {
+        e.preventDefault();
+        void this.importImage(file);
+      }
+    });
+    const ws = document.querySelector('#workspace') as HTMLElement;
+    ws.addEventListener('dragover', (e) => {
+      if ([...(e.dataTransfer?.items ?? [])].some((i) => i.kind === 'file')) {
+        e.preventDefault();
+        ws.classList.add('drop');
+      }
+    });
+    ws.addEventListener('dragleave', () => ws.classList.remove('drop'));
+    ws.addEventListener('drop', (e) => {
+      ws.classList.remove('drop');
+      const file = [...(e.dataTransfer?.files ?? [])][0];
+      if (!file) return;
+      e.preventDefault();
+      if (file.type.startsWith('image/')) void this.importImage(file);
+      else if (file.name.endsWith(FILE_EXT)) void file.text().then((t) => this.loadText(t, file.name));
+    });
+    window.addEventListener('fairway:import-image', () => void this.importImageDialog());
+  }
+
+  private loadText(text: string, name: string): void {
+    if (this.unsaved && !confirm('Open another course? Unsaved changes to the current course will be lost.')) return;
+    try {
+      this.fileHandle = null;
+      this.unsaved = false;
+      this.ed.setDoc(deserialize(text));
+      this.scheduleAutosave();
+      this.ed.setMessage(`Opened ${name}`);
+    } catch (err) {
+      alert(`Could not open: ${(err as Error).message}`);
+    }
+  }
+
   courseProperties(): void {
     const name = h('input', { value: this.ed.doc.name });
     const bg = h('select');
@@ -289,8 +377,15 @@ export class App {
     c.width = ed.doc.width * scale;
     c.height = ed.doc.height * scale;
     const ctx = c.getContext('2d')!;
+    ctx.fillStyle = rgbCss(surfaceColor(ed.doc.background));
+    ctx.fillRect(0, 0, c.width, c.height);
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(ed.docCanvas, 0, 0, c.width, c.height);
+    // Underlays are reference material and are never exported. Holes are, if shown.
+    if (ed.showHoles && ed.doc.holes.length) {
+      const k = scale / ed.doc.yardsPerPixel;
+      drawHoles(ctx, ed.doc.holes, { toScreen: (w) => ({ x: w.x * k, y: w.y * k }), unitsPerYard: k, uiScale: Math.max(1, scale / 1.5) });
+    }
     c.toBlob((b) => b && download(b, this.fileName().replace(FILE_EXT, scale > 1 ? `@${scale}x.png` : '.png')), 'image/png');
   }
 
@@ -306,6 +401,8 @@ export class App {
           { separator: true, label: '' },
           { label: 'Save', shortcut: '⌘S', action: () => void this.save() },
           { label: 'Save as…', shortcut: '⇧⌘S', action: () => void this.save(true) },
+          { separator: true, label: '' },
+          { label: 'Import underlay image…', action: () => void this.importImageDialog() },
           { separator: true, label: '' },
           { label: 'Export PNG (1×)', action: () => this.exportPng(1) },
           { label: 'Export PNG (2×)', action: () => this.exportPng(2) },
@@ -356,6 +453,18 @@ export class App {
       {
         title: 'View',
         items: [
+          { label: 'Show holes', checked: () => ed.showHoles, action: () => ed.setHoleView({ showHoles: !ed.showHoles }) },
+          {
+            label: '    Distance arcs from tee',
+            checked: () => ed.arcsFromTee,
+            action: () => ed.setHoleView({ arcsFromTee: !ed.arcsFromTee }),
+          },
+          {
+            label: '    Distance arcs to green',
+            checked: () => ed.arcsToGreen,
+            action: () => ed.setHoleView({ arcsToGreen: !ed.arcsToGreen }),
+          },
+          { separator: true, label: '' },
           { label: 'Zoom in', shortcut: '⌘+', action: () => ed.zoomStep(1) },
           { label: 'Zoom out', shortcut: '⌘−', action: () => ed.zoomStep(-1) },
           { label: 'Zoom to fit', shortcut: '⌘0', action: () => ed.fit() },
@@ -454,6 +563,8 @@ export class App {
       ['Double‑click outline', 'Add point'],
       ['⌘S / ⌘O', 'Save / Open'],
       ['⌘0 / ⌘1', 'Fit / Actual pixels'],
+      ['⌘V', 'Paste a screenshot as an underlay'],
+      ['3 / 4 / 5 / 6', 'Set par of the selected hole (Hole tool)'],
     ];
     const table = h('table', { class: 'shortcuts' });
     for (const [k, v] of rows) table.append(h('tr', {}, h('td', {}, h('kbd', { textContent: k })), h('td', { textContent: v })));

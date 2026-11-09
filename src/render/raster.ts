@@ -88,6 +88,7 @@ export function sortedFeatures(layer: VectorLayer): Feature[] {
 
 /**
  * Render a doc‑pixel rectangle (integer, inside the doc) into packed RGBA words.
+ * Unpainted pixels are transparent (0).
  */
 export function renderRegion(doc: CourseDoc, r: Rect): Uint32Array {
   const W = doc.width;
@@ -95,11 +96,8 @@ export function renderRegion(doc: CourseDoc, r: Rect): Uint32Array {
   const ypp = doc.yardsPerPixel;
   const out = new Uint32Array(r.w * r.h);
 
-  const bg = surfaceCode(doc.background) || surfaceCode('white');
-  for (let y = 0; y < r.h; y++) {
-    const row = y * r.w;
-    for (let x = 0; x < r.w; x++) out[row + x] = surfacePixel(bg, r.x + x, r.y + y);
-  }
+  // The background is left transparent: the view draws the background color and any
+  // underlay images beneath this layer stack.
 
   // Region plus a 1px border, so outlines at the region edge see their neighbors.
   const ex = rectIntersect({ x: r.x - 1, y: r.y - 1, w: r.w + 2, h: r.h + 2 }, { x: 0, y: 0, w: W, h: H })!;
@@ -107,7 +105,7 @@ export function renderRegion(doc: CourseDoc, r: Rect): Uint32Array {
   const oy = r.y - ex.y;
 
   for (const layer of doc.layers) {
-    if (!layer.visible) continue;
+    if (!layer.visible || layer.kind === 'image') continue;
     let codes: Uint8Array;
     let outlines = true;
     if (layer.kind === 'raster') {
@@ -195,7 +193,7 @@ export function visibleCodes(doc: CourseDoc): Uint8Array {
   const full = { x: 0, y: 0, w: W, h: H };
   const map = new Uint8Array(W * H).fill(surfaceCode(doc.background) || surfaceCode('white'));
   for (const layer of doc.layers) {
-    if (!layer.visible) continue;
+    if (!layer.visible || layer.kind === 'image') continue;
     const codes = layer.kind === 'raster' ? layer.pixels : rasterizeVectorLayer(layer, full, doc.yardsPerPixel);
     if (!codes) continue;
     for (let i = 0; i < map.length; i++) if (codes[i]) map[i] = codes[i];

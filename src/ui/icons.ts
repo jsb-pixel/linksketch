@@ -27,6 +27,15 @@ export const TOOL_ICONS: Record<ToolId, string> = {
   wand: svg(
     '<path d="M2 14 11 5" stroke="#000" stroke-width="2"/><path d="M12 1v2M12 7v2M9 4h2M14 4h2M10 2l1 1M14 6l1 1M14 2l-1 1" stroke="#c08000"/><rect x="11" y="3" width="2" height="2" fill="#ffd34d"/>',
   ),
+  hole: svg(
+    '<rect x="1" y="11" width="5" height="4" fill="#466a30" stroke="#000"/><path d="M4 11 9 6 12 4" stroke="#000" stroke-dasharray="2 1" fill="none"/><path d="M12 1v8" stroke="#000"/><path d="M12 1l4 1.5-4 1.5z" fill="#ed1c24" stroke="#000" stroke-width=".5"/>',
+  ),
+  underlay: svg(
+    '<rect x="1" y="3" width="11" height="9" fill="#9cc7e8" stroke="#000"/><path d="M1 10l3-3 3 2 2-2 3 3" fill="#6aa339" stroke="#000" stroke-width=".7"/><path d="M13 9v6M10 12h6M13 9l-1 1M13 9l1 1M13 15l-1-1M13 15l1-1" stroke="#000"/>',
+  ),
+  scale: svg(
+    '<rect x="1" y="9" width="14" height="5" fill="#ff9be0" stroke="#000"/><path d="M4 9v2M7 9v3M10 9v2M13 9v3" stroke="#000"/><path d="M2 5h12M2 5l2-2M2 5l2 2M14 5l-2-2M14 5l-2 2" stroke="#000"/>',
+  ),
   eraser: svg('<path d="M2 11l6-6 6 6-3 3H5z" fill="#ffb6c1" stroke="#000"/><path d="M5 8l6 6" stroke="#000"/>'),
   picker: svg(
     '<path d="M3 13l7-7 1 1-7 7H3z" fill="#fff" stroke="#000"/><rect x="10" y="2" width="4" height="4" fill="#000" transform="rotate(45 12 4)"/>',

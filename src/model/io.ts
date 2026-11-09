@@ -62,6 +62,10 @@ export function serialize(doc: CourseDoc): string {
     surfaceTable: SURFACES.map((s) => s.id),
     layers: doc.layers.map((l) => {
       const base = { id: l.id, name: l.name, visible: l.visible, locked: l.locked, kind: l.kind };
+      if (l.kind === 'image') {
+        const { src, imgW, imgH, x, y, scale, rotation, opacity, above } = l;
+        return { ...base, src, imgW, imgH, x, y, scale, rotation, opacity, above };
+      }
       return l.kind === 'raster'
         ? { ...base, outline: l.outline, rle: toBase64(rleEncode(l.pixels)) }
         : {
@@ -72,7 +76,7 @@ export function serialize(doc: CourseDoc): string {
             })),
           };
     }),
-    holes: doc.holes,
+    holes: doc.holes.map((h) => ({ ...h, points: h.points.map((p) => [round3(p.x), round3(p.y)]) })),
   });
 }
 
@@ -93,6 +97,22 @@ export function deserialize(text: string): CourseDoc {
 
   const layers: Layer[] = (j.layers ?? []).map((l: any): Layer => {
     const base = { id: String(l.id), name: String(l.name), visible: !!l.visible, locked: !!l.locked };
+    if (l.kind === 'image') {
+      const num = (v: unknown, d: number) => (Number.isFinite(+(v as number)) ? +(v as number) : d);
+      return {
+        ...base,
+        kind: 'image',
+        src: String(l.src ?? ''),
+        imgW: num(l.imgW, 1),
+        imgH: num(l.imgH, 1),
+        x: num(l.x, 0),
+        y: num(l.y, 0),
+        scale: num(l.scale, 1) || 1,
+        rotation: num(l.rotation, 0),
+        opacity: Math.max(0, Math.min(1, num(l.opacity, 0.6))),
+        above: !!l.above,
+      };
+    }
     if (l.kind === 'raster') {
       const px = rleDecode(fromBase64(l.rle ?? ''), W * H);
       for (let i = 0; i < px.length; i++) if (px[i]) px[i] = remap[px[i]];
@@ -118,7 +138,18 @@ export function deserialize(text: string): CourseDoc {
     background: String(j.background ?? 'white'),
     colors: parseColors(j.colors),
     layers,
-    holes: Array.isArray(j.holes) ? j.holes : [],
+    holes: Array.isArray(j.holes)
+      ? j.holes
+          .map((h: any) => ({
+            id: String(h.id),
+            number: Math.max(1, Math.round(+h.number) || 1),
+            par: Math.max(3, Math.min(6, Math.round(+h.par) || 4)),
+            points: (h.points ?? []).map((p: [number, number] | { x: number; y: number }) =>
+              Array.isArray(p) ? { x: +p[0], y: +p[1] } : { x: +p.x, y: +p.y },
+            ),
+          }))
+          .filter((h: { points: unknown[] }) => h.points.length >= 2)
+      : [],
   };
 }
 

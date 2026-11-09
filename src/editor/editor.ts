@@ -2,10 +2,12 @@ import { dist, pixelRect, rectUnion } from '../geom/geom';
 import { findLayer } from '../model/doc';
 import { History } from '../model/history';
 import { surfaceByCode, surfaceById } from '../model/surfaces';
-import type { CourseDoc, Feature, Layer, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
+import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
+import { drawHoles } from './holes';
+import { drawUnderlay, drawUnderlayFrame } from './underlay';
 import { featureContains, flatten, renderRegion, sortedFeatures } from '../render/raster';
 import { forEachPixel, regionEdges, traceOutline, type Region } from '../render/regions';
-import { applyColors, surfaceCode, type ColorMap, type SurfaceColors } from '../model/surfaces';
+import { applyColors, rgbCss, surfaceCode, surfaceColor, type ColorMap, type SurfaceColors } from '../model/surfaces';
 import { uid } from '../model/doc';
 
 export type ToolId =
@@ -21,7 +23,10 @@ export type ToolId =
   | 'picker'
   | 'ruler'
   | 'zoom'
-  | 'hand';
+  | 'hand'
+  | 'hole'
+  | 'underlay'
+  | 'scale';
 
 export interface PointerInfo {
   /** CSS px relative to the canvas. */
@@ -75,7 +80,7 @@ export interface PixelSelection extends Region {
   edges: [number, number, number, number][];
 }
 
-export type EditorEvent = 'palette' | 'doc' | 'selection' | 'tool' | 'surface' | 'view' | 'status' | 'history' | 'options';
+export type EditorEvent = 'holes' | 'palette' | 'doc' | 'selection' | 'tool' | 'surface' | 'view' | 'status' | 'history' | 'options';
 
 export interface Ruler {
   points: Vec2[];
@@ -113,6 +118,10 @@ export class Editor {
   yardGridSize: 25 | 50 | 100 = 100;
   /** Zoom at which the pixel grid appears; 0 = never. */
   pixelGridZoom = 8;
+  showHoles = true;
+  arcsFromTee = true;
+  arcsToGreen = true;
+  selectedHoleId: string | null = null;
 
   activeLayerId: string | null = null;
   selection: Selection | null = null;
@@ -160,6 +169,8 @@ export class Editor {
     this.doc = doc;
     this.history = new History(doc);
     this.history.onChange = () => {
+      if (this.selectedHoleId && !this.doc.holes.some((h) => h.id === this.selectedHoleId)) this.selectedHoleId = null;
+      this.requestFrame();
       this.syncColors();
       this.validateSelection();
       this.validateRegion();
@@ -171,11 +182,91 @@ export class Editor {
     this.docCanvas.height = doc.height;
     this.selection = null;
     this.region = null;
+    this.selectedHoleId = null;
     this.ruler = { points: [], live: null, active: false };
     this.activeLayerId = doc.layers.find((l) => l.kind === 'vector')?.id ?? doc.layers[0]?.id ?? null;
     this.invalidate();
     this.fit();
     this.emit('doc', 'selection', 'history', 'view');
+  }
+
+  // ---------------------------------------------------------------- holes
+  selectedHole(): Hole | null {
+    return this.doc.holes.find((h) => h.id === this.selectedHoleId) ?? null;
+  }
+
+  selectHole(id: string | null): void {
+    this.selectedHoleId = id;
+    this.emit('selection', 'holes');
+    this.requestFrame();
+  }
+
+  /** Change a hole as one undo step. */
+  updateHole(id: string, label: string, fn: (h: Hole) => Partial<Hole>): void {
+    const i = this.doc.holes.findIndex((h) => h.id === id);
+    if (i < 0) return;
+    this.history.begin(label);
+    this.history.snapshotHoles();
+    const holes = this.doc.holes.slice();
+    holes[i] = { ...holes[i], ...fn(holes[i]) };
+    this.doc.holes = holes;
+    this.history.commit();
+    this.emit('holes', 'selection');
+  }
+
+  /** Give a hole a number, swapping with whichever hole had it. */
+  renumberHole(id: string, n: number): void {
+    const h = this.doc.holes.find((x) => x.id === id);
+    if (!h || n < 1 || n === h.number) return;
+    this.history.begin('Renumber hole');
+    this.history.snapshotHoles();
+    const old = h.number;
+    this.doc.holes = this.doc.holes.map((x) => (x.id === id ? { ...x, number: n } : x.number === n ? { ...x, number: old } : x));
+    this.history.commit();
+    this.emit('holes', 'selection');
+  }
+
+  deleteHole(id: string): void {
+    this.history.begin('Delete hole');
+    this.history.snapshotHoles();
+    this.doc.holes = this.doc.holes.filter((h) => h.id !== id);
+    this.history.commit();
+    if (this.selectedHoleId === id) this.selectedHoleId = null;
+    this.emit('holes', 'selection');
+  }
+
+  /** Pan so a world point is in the middle of the view. */
+  centerOn(w: Vec2): void {
+    const p = this.worldToPx(w);
+    this.panX = this.cssW / 2 - p.x * this.zoom;
+    this.panY = this.cssH / 2 - p.y * this.zoom;
+    this.emit('view');
+    this.requestFrame();
+  }
+
+  /** World rectangle currently visible. */
+  visibleWorld(): { x: number; y: number; w: number; h: number } {
+    const a = this.pxToWorld(this.screenToPx({ x: 0, y: 0 }));
+    const b = this.pxToWorld(this.screenToPx({ x: this.cssW, y: this.cssH }));
+    return { x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y };
+  }
+
+  // ---------------------------------------------------------------- underlays
+  /** The underlay that underlay tools act on: active layer, else top‑most visible. */
+  activeImage(): ImageLayer | null {
+    const a = this.activeLayer;
+    if (a?.kind === 'image') return a;
+    return ([...this.doc.layers].reverse().find((l) => l.kind === 'image' && l.visible) as ImageLayer) ?? null;
+  }
+
+  /** Change an underlay's placement as one undo step. */
+  updateImage(l: ImageLayer, label: string, change: Partial<ImagePlacement>): void {
+    this.history.begin(label);
+    this.history.snapshotImage(l);
+    Object.assign(l, change);
+    this.history.commit();
+    this.emit('selection');
+    this.requestFrame();
   }
 
   get activeLayer(): Layer | undefined {
@@ -345,7 +436,7 @@ export class Editor {
     if (x < 0 || y < 0 || x >= this.doc.width || y >= this.doc.height) return this.doc.background;
     for (let i = this.doc.layers.length - 1; i >= 0; i--) {
       const layer = this.doc.layers[i];
-      if (!layer.visible) continue;
+      if (!layer.visible || layer.kind === 'image') continue;
       if (layer.kind === 'raster') {
         const c = layer.pixels[y * this.doc.width + x];
         if (c) return surfaceByCode(c)?.id ?? this.doc.background;
@@ -596,12 +687,39 @@ export class Editor {
     const y = Math.round(this.panY * this.dpr) / this.dpr;
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillRect(x + 3, y + 3, W, H);
+    ctx.fillStyle = rgbCss(surfaceColor(this.doc.background));
+    ctx.fillRect(x, y, W, H);
+
+    const toScreen = (w: Vec2) => this.worldToScreen(w);
+    const upy = this.zoom / this.doc.yardsPerPixel;
+    const images = this.doc.layers.filter((l): l is ImageLayer => l.kind === 'image' && l.visible);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, W, H);
+    ctx.clip();
+    for (const l of images) if (!l.above) drawUnderlay(ctx, l, toScreen, upy, () => this.requestFrame());
     ctx.imageSmoothingEnabled = this.zoom < 1;
     ctx.imageSmoothingQuality = 'medium';
     ctx.drawImage(this.docCanvas, x, y, W, H);
+    for (const l of images) if (l.above) drawUnderlay(ctx, l, toScreen, upy, () => this.requestFrame());
+    ctx.restore();
 
     if (this.pixelGridZoom && this.zoom >= this.pixelGridZoom) this.drawGrid(1, 'rgba(0,0,0,0.12)');
     if (this.showYardGrid) this.drawGrid(this.yardGridSize / this.doc.yardsPerPixel, 'rgba(0,0,0,0.35)', true);
+
+    if (this.showHoles)
+      drawHoles(ctx, this.doc.holes, {
+        toScreen,
+        unitsPerYard: upy,
+        selectedId: this.selectedHoleId,
+        arcsFromTee: this.arcsFromTee,
+        arcsToGreen: this.arcsToGreen,
+        handles: this.tool.id === 'hole',
+      });
+    const img = this.activeImage();
+    if (img && (this.tool.id === 'underlay' || this.tool.id === 'scale' || this.activeLayer === img)) {
+      drawUnderlayFrame(ctx, img, toScreen);
+    }
 
     this.drawSelection(ctx);
     this.drawRegion(ctx);
@@ -620,6 +738,12 @@ export class Editor {
     this.setYardGrid(this.showYardGrid ? 0 : this.yardGridSize);
   }
 
+  setHoleView(change: Partial<Pick<Editor, 'showHoles' | 'arcsFromTee' | 'arcsToGreen'>>): void {
+    Object.assign(this, change);
+    this.saveViewPrefs();
+    this.requestFrame();
+  }
+
   setPixelGridZoom(z: number): void {
     this.pixelGridZoom = z;
     this.saveViewPrefs();
@@ -632,6 +756,7 @@ export class Editor {
       if (typeof p.showYardGrid === 'boolean') this.showYardGrid = p.showYardGrid;
       if ([25, 50, 100].includes(p.yardGridSize)) this.yardGridSize = p.yardGridSize;
       if (typeof p.pixelGridZoom === 'number') this.pixelGridZoom = p.pixelGridZoom;
+      for (const k of ['showHoles', 'arcsFromTee', 'arcsToGreen'] as const) if (typeof p[k] === 'boolean') this[k] = p[k];
     } catch {
       /* storage unavailable — use defaults */
     }
@@ -639,8 +764,11 @@ export class Editor {
 
   private saveViewPrefs(): void {
     try {
-      const { showYardGrid, yardGridSize, pixelGridZoom } = this;
-      localStorage.setItem('fairway-view', JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom }));
+      const { showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen } = this;
+      localStorage.setItem(
+        'fairway-view',
+        JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen }),
+      );
     } catch {
       /* ignore */
     }

@@ -1,7 +1,9 @@
 import { dedupe, dist, pathLength, simplifyClosed } from '../geom/geom';
-import { uid } from '../model/doc';
+import { suggestPar, uid } from '../model/doc';
 import { rgbCss, surfaceCode, surfaceColor } from '../model/surfaces';
-import type { Feature, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
+import type { Feature, ImageLayer, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
+import { dialog, field } from '../ui/ui';
+import { drawPlayLine } from './holes';
 import { flatten, visibleCodes } from '../render/raster';
 import { floodRegion, forEachPixel } from '../render/regions';
 import type { Editor, PointerInfo, Tool } from './editor';
@@ -727,7 +729,7 @@ export class WandTool implements Tool {
     if (x < 0 || y < 0 || x >= W || y >= ed.doc.height) return ed.setRegion(null);
     for (let i = ed.doc.layers.length - 1; i >= 0; i--) {
       const layer = ed.doc.layers[i];
-      if (!layer.visible) continue;
+      if (!layer.visible || layer.kind === 'image') continue;
       if (layer.kind === 'vector') {
         // A shape on top of the paint: select the shape instead.
         const hit = ed.hitFeature(e.world);
@@ -852,6 +854,334 @@ export class HandTool implements Tool {
   hint = 'Drag to pan · tip: hold Space with any tool, or scroll with two fingers';
 }
 
+// ---------------------------------------------------------------- holes
+
+/** Click tee → aim points → green. Drag points to edit. */
+export class HoleTool implements Tool {
+  id = 'hole' as const;
+  name = 'Hole (tee → aim points → green)';
+  key = 'o';
+  cursor = 'crosshair';
+  hint = 'Click the tee, click aim points, double‑click (or Enter) on the green · drag points to edit · 3/4/5 sets par · ⌫ deletes hole';
+  private pts: Vec2[] = [];
+  private live: Vec2 | null = null;
+  private drag: { id: string; index: number; moved: boolean } | null = null;
+
+  constructor(private ed: Editor) {}
+
+  /** Hole point near the cursor (selected hole first). */
+  private hitPoint(screen: Vec2): { id: string; index: number } | null {
+    const holes = [...this.ed.doc.holes].sort((a, b) => (b.id === this.ed.selectedHoleId ? 1 : 0) - (a.id === this.ed.selectedHoleId ? 1 : 0));
+    for (const h of holes)
+      for (let i = 0; i < h.points.length; i++)
+        if (dist(this.ed.worldToScreen(h.points[i]), screen) <= HANDLE_RADIUS) return { id: h.id, index: i };
+    return null;
+  }
+
+  /** Hole whose line passes near the cursor, with the leg index. */
+  private hitLine(screen: Vec2): { id: string; leg: number; at: Vec2 } | null {
+    for (const h of this.ed.doc.holes)
+      for (let i = 0; i + 1 < h.points.length; i++) {
+        const a = this.ed.worldToScreen(h.points[i]);
+        const b = this.ed.worldToScreen(h.points[i + 1]);
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const l2 = dx * dx + dy * dy || 1;
+        const t = Math.max(0, Math.min(1, ((screen.x - a.x) * dx + (screen.y - a.y) * dy) / l2));
+        const q = { x: a.x + t * dx, y: a.y + t * dy };
+        if (dist(q, screen) <= 6) return { id: h.id, leg: i, at: this.ed.pxToWorld(this.ed.screenToPx(q)) };
+      }
+    return null;
+  }
+
+  down(e: PointerInfo): void {
+    const ed = this.ed;
+    const p = clampWorld(ed, e.world);
+    if (this.pts.length) {
+      if (e.clicks >= 2) return this.finish();
+      this.pts.push(p);
+      return;
+    }
+    const hp = this.hitPoint(e.screen);
+    if (hp) {
+      const hole = ed.doc.holes.find((h) => h.id === hp.id)!;
+      ed.selectHole(hp.id);
+      if (e.alt) {
+        if (hole.points.length > 2) ed.updateHole(hp.id, 'Delete hole point', (h) => ({ points: h.points.filter((_, i) => i !== hp.index) }));
+        return;
+      }
+      ed.history.begin('Move hole point');
+      ed.history.snapshotHoles();
+      this.drag = { ...hp, moved: false };
+      return;
+    }
+    const hl = this.hitLine(e.screen);
+    if (hl) {
+      ed.selectHole(hl.id);
+      if (e.clicks >= 2) ed.updateHole(hl.id, 'Add aim point', (h) => ({ points: [...h.points.slice(0, hl.leg + 1), hl.at, ...h.points.slice(hl.leg + 1)] }));
+      return;
+    }
+    ed.selectHole(null);
+    this.pts = [p];
+    this.live = p;
+  }
+
+  move(e: PointerInfo, dragging: boolean): void {
+    const ed = this.ed;
+    if (this.drag && dragging) {
+      const d = this.drag;
+      ed.doc.holes = ed.doc.holes.map((h) =>
+        h.id === d.id ? { ...h, points: h.points.map((q, i) => (i === d.index ? clampWorld(ed, e.world) : q)) } : h,
+      );
+      d.moved = true;
+      ed.emit('holes', 'selection');
+      return;
+    }
+    if (this.pts.length) this.live = clampWorld(ed, e.world);
+    else ed.canvas.style.cursor = this.hitPoint(e.screen) ? 'move' : this.hitLine(e.screen) ? 'pointer' : this.cursor;
+  }
+
+  up(): void {
+    if (!this.drag) return;
+    const moved = this.drag.moved;
+    this.drag = null;
+    if (moved) this.ed.history.commit();
+    else this.ed.history.abort();
+    this.ed.emit('holes', 'selection');
+  }
+
+  private finish(): void {
+    const ed = this.ed;
+    const pts = dedupe(this.pts, 0.5);
+    this.pts = [];
+    this.live = null;
+    if (pts.length < 2) return ed.setMessage('A hole needs at least a tee and a green.');
+    const used = new Set(ed.doc.holes.map((h) => h.number));
+    let n = 1;
+    while (used.has(n)) n++;
+    const hole = { id: uid('H'), number: n, par: suggestPar(pathLength(pts)), points: pts };
+    ed.history.begin('Add hole');
+    ed.history.snapshotHoles();
+    ed.doc.holes = [...ed.doc.holes, hole];
+    ed.history.commit();
+    ed.selectHole(hole.id);
+  }
+
+  cancel(): void {
+    this.pts = [];
+    this.live = null;
+    if (this.drag) {
+      this.drag = null;
+      this.ed.history.abort();
+    }
+  }
+
+  keydown(e: KeyboardEvent): boolean {
+    const ed = this.ed;
+    if (this.pts.length) {
+      if (e.key === 'Enter') {
+        this.finish();
+        return true;
+      }
+      if (e.key === 'Escape') {
+        this.cancel();
+        return true;
+      }
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        this.pts.pop();
+        return true;
+      }
+      return false;
+    }
+    const sel = ed.selectedHole();
+    if (!sel) return false;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      ed.deleteHole(sel.id);
+      return true;
+    }
+    if (['3', '4', '5', '6'].includes(e.key)) {
+      ed.updateHole(sel.id, 'Set par', () => ({ par: +e.key }));
+      return true;
+    }
+    if (e.key === 'Escape') {
+      ed.selectHole(null);
+      return true;
+    }
+    return false;
+  }
+
+  overlay(ctx: CanvasRenderingContext2D): void {
+    if (!this.pts.length) return;
+    const pts = this.live ? [...this.pts, this.live] : this.pts;
+    const scr = pts.map((p) => this.ed.worldToScreen(p));
+    drawPlayLine(ctx, scr, true);
+    const last = scr[scr.length - 1];
+    const text = `${Math.round(pathLength(pts))} yd`;
+    ctx.save();
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    const w = ctx.measureText(text).width + 8;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(Math.round(last.x + 10), Math.round(last.y - 20), w, 16);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, Math.round(last.x + 14), Math.round(last.y - 8));
+    ctx.restore();
+  }
+}
+
+// ---------------------------------------------------------------- underlays
+
+/** Drag the underlay image around; arrows nudge it. */
+export class UnderlayTool implements Tool {
+  id = 'underlay' as const;
+  name = 'Move underlay image';
+  key = 'u';
+  cursor = 'move';
+  hint = 'Drag to move the underlay image · arrows nudge (⇧ = 10 yd) · opacity, rotation and scale are in the Info panel';
+  private drag: { layer: ImageLayer; start: Vec2; ox: number; oy: number } | null = null;
+
+  constructor(private ed: Editor) {}
+
+  private target(): ImageLayer | null {
+    const l = this.ed.activeImage();
+    if (!l) this.ed.setMessage('No underlay yet — use File → Import underlay image, drag a picture in, or paste one (⌘V).');
+    else if (l.locked) {
+      this.ed.setMessage('The underlay is locked — unlock it in the Layers panel.');
+      return null;
+    }
+    return l;
+  }
+
+  down(e: PointerInfo): void {
+    const l = this.target();
+    if (!l) return;
+    if (this.ed.activeLayerId !== l.id) this.ed.setActiveLayer(l.id);
+    this.ed.history.begin('Move underlay');
+    this.ed.history.snapshotImage(l);
+    this.drag = { layer: l, start: e.world, ox: l.x, oy: l.y };
+  }
+  move(e: PointerInfo, dragging: boolean): void {
+    const d = this.drag;
+    if (!d || !dragging) return;
+    d.layer.x = d.ox + e.world.x - d.start.x;
+    d.layer.y = d.oy + e.world.y - d.start.y;
+  }
+  up(): void {
+    if (!this.drag) return;
+    this.drag = null;
+    this.ed.history.commit();
+    this.ed.emit('selection');
+  }
+  cancel(): void {
+    if (this.drag) this.ed.history.abort();
+    this.drag = null;
+  }
+  keydown(e: KeyboardEvent): boolean {
+    const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    const a = arrows[e.key];
+    if (!a) return false;
+    const l = this.target();
+    if (!l) return true;
+    const step = e.shiftKey ? 10 : 1;
+    this.ed.updateImage(l, 'Nudge underlay', { x: l.x + a[0] * step, y: l.y + a[1] * step });
+    return true;
+  }
+}
+
+/** Click two points on the underlay a known distance apart, then type the real distance. */
+export class ScaleTool implements Tool {
+  id = 'scale' as const;
+  name = 'Set underlay scale';
+  key = 'k';
+  cursor = 'crosshair';
+  hint = 'Click two points on the underlay that you know the real distance between (e.g. a hole’s tee and green) — then type it in yards';
+  private a: Vec2 | null = null;
+  private live: Vec2 | null = null;
+
+  constructor(private ed: Editor) {}
+
+  down(e: PointerInfo): void {
+    const l = this.ed.activeImage();
+    if (!l) return this.ed.setMessage('No underlay yet — import an image first (File → Import underlay image).');
+    if (!this.a) {
+      this.a = e.world;
+      this.live = e.world;
+      return;
+    }
+    const a = this.a;
+    const b = e.world;
+    this.a = null;
+    this.live = null;
+    const measured = dist(a, b);
+    if (measured < 1e-6) return;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.step = '1';
+    input.value = String(Math.round(measured));
+    const body = document.createElement('div');
+    body.className = 'form';
+    body.append(
+      field('Real distance', input, `Right now this line measures ${Math.round(measured)} yd on the course.`),
+    );
+    dialog('Set underlay scale', body, [
+      {
+        label: 'Apply',
+        primary: true,
+        onClick: () => {
+          const target = +input.value;
+          if (!(target > 0)) return false;
+          const k = target / measured;
+          // Scale the image about point A so A stays put.
+          this.ed.updateImage(l, 'Set underlay scale', {
+            scale: l.scale * k,
+            x: a.x + (l.x - a.x) * k,
+            y: a.y + (l.y - a.y) * k,
+          });
+          this.ed.setMessage(`Underlay scaled: that line is now ${Math.round(target)} yd. Check another distance with the ruler (M).`);
+        },
+      },
+      { label: 'Cancel', onClick: () => {} },
+    ]);
+  }
+  move(e: PointerInfo): void {
+    if (this.a) this.live = e.world;
+  }
+  cancel(): void {
+    this.a = null;
+    this.live = null;
+  }
+  keydown(e: KeyboardEvent): boolean {
+    if (e.key === 'Escape' && this.a) {
+      this.cancel();
+      return true;
+    }
+    return false;
+  }
+  overlay(ctx: CanvasRenderingContext2D): void {
+    if (!this.a || !this.live) return;
+    const a = this.ed.worldToScreen(this.a);
+    const b = this.ed.worldToScreen(this.live);
+    ctx.save();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#000';
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#ff40c0';
+    ctx.stroke();
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    const text = `${Math.round(dist(this.a, this.live))} yd now`;
+    const w = ctx.measureText(text).width + 8;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(b.x + 10, b.y - 20, w, 16);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, b.x + 14, b.y - 8);
+    ctx.restore();
+  }
+}
+
 export function registerAllTools(ed: Editor): void {
   for (const T of [
     SelectTool,
@@ -867,6 +1197,9 @@ export function registerAllTools(ed: Editor): void {
     RulerTool,
     ZoomTool,
     HandTool,
+    HoleTool,
+    UnderlayTool,
+    ScaleTool,
   ]) {
     ed.registerTool(new T(ed));
   }

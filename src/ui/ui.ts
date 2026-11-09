@@ -1,4 +1,5 @@
-import { polygonArea, pathLength } from '../geom/geom';
+import { dist, polygonArea, pathLength } from '../geom/geom';
+import { holeYards } from '../editor/holes';
 import type { Editor, ToolId } from '../editor/editor';
 import { createRasterLayer, createVectorLayer } from '../model/doc';
 import { SURFACES, customSlotUsed, surfaceById, surfaceCode, surfaceColor, surfacePixel, rgbCss } from '../model/surfaces';
@@ -30,9 +31,12 @@ const TOOL_ORDER: ToolId[] = [
   'wand',
   'picker',
   'ruler',
+  'hole',
   'select',
   'freehand',
   'polygon',
+  'underlay',
+  'scale',
   'zoom',
   'hand',
 ];
@@ -317,6 +321,9 @@ export function buildLayersPanel(ed: Editor): void {
         insertAboveActive(l);
       }),
     ),
+    btn('+ Image', 'Import an underlay image to trace (or paste with ⌘V / drag one in)', () =>
+      window.dispatchEvent(new Event('fairway:import-image')),
+    ),
     btn('▲', 'Move layer up', () => moveActive(1)),
     btn('▼', 'Move layer down', () => moveActive(-1)),
     btn('✕', 'Delete layer', () => {
@@ -398,8 +405,9 @@ export function buildLayersPanel(ed: Editor): void {
         }
         const kind = h('span', {
           class: 'kind',
-          title: l.kind === 'raster' ? 'Paint layer (pixels)' : 'Shape layer (editable shapes)',
-          textContent: l.kind === 'raster' ? '▦' : '◆',
+          title:
+            l.kind === 'raster' ? 'Paint layer (pixels)' : l.kind === 'vector' ? 'Shape layer (editable shapes)' : 'Underlay image (reference only — not exported)',
+          textContent: l.kind === 'raster' ? '▦' : l.kind === 'vector' ? '◆' : '🖼',
         });
         const name = h('span', { class: 'name', textContent: l.name });
         const count = l.kind === 'vector' ? h('span', { class: 'count', textContent: `${l.features.length}` }) : '';
@@ -432,6 +440,55 @@ export function buildInfoPanel(ed: Editor): void {
 
   const render = () => {
     const parts: Node[] = [];
+    const hole = ed.selectedHole();
+    if (hole) {
+      parts.push(h('div', { class: 'info-head', textContent: `Hole ${hole.number}` }));
+      parts.push(row('Yardage', `${holeYards(hole)} yd`));
+      const num = h('input', { type: 'number', min: '1', max: '36', value: String(hole.number), class: 'num' });
+      num.addEventListener('change', () => ed.renumberHole(hole.id, Math.round(+num.value)));
+      const par = h('select', { class: 'num' });
+      for (const p of [3, 4, 5, 6]) par.append(h('option', { value: String(p), textContent: String(p), selected: p === hole.par }));
+      par.addEventListener('change', () => ed.updateHole(hole.id, 'Set par', () => ({ par: +par.value })));
+      parts.push(h('div', { class: 'kv' }, h('span', { textContent: 'Number' }), num));
+      parts.push(h('div', { class: 'kv' }, h('span', { textContent: 'Par' }), par));
+      if (hole.points.length > 2) {
+        const legs = hole.points.slice(1).map((p, i) => Math.round(dist(hole.points[i], p)));
+        parts.push(row('Legs', legs.join(' + ')));
+      }
+      const del = h('button', { class: 'small', textContent: 'Delete hole' });
+      del.addEventListener('click', () => ed.deleteHole(hole.id));
+      parts.push(h('div', { class: 'btn-row' }, del));
+    }
+    const active = ed.activeLayer;
+    if (active?.kind === 'image') {
+      const l = active;
+      parts.push(h('div', { class: 'info-head', textContent: 'Underlay image' }));
+      const op = h('input', { type: 'range', min: '0', max: '100', value: String(Math.round(l.opacity * 100)) });
+      op.addEventListener('input', () => {
+        l.opacity = +op.value / 100;
+        ed.requestFrame();
+      });
+      let before = l.opacity;
+      op.addEventListener('pointerdown', () => (before = l.opacity));
+      op.addEventListener('change', () => {
+        const v = l.opacity;
+        l.opacity = before;
+        ed.updateImage(l, 'Underlay opacity', { opacity: v });
+      });
+      parts.push(h('div', { class: 'kv' }, h('span', { textContent: 'Opacity' }), op));
+      const rot = h('input', { type: 'number', step: '0.5', value: String(+l.rotation.toFixed(2)), class: 'num' });
+      rot.addEventListener('change', () => ed.updateImage(l, 'Rotate underlay', { rotation: +rot.value || 0 }));
+      parts.push(h('div', { class: 'kv' }, h('span', { textContent: 'Rotation °' }), rot));
+      parts.push(row('Scale', `1 px = ${l.scale < 1 ? l.scale.toFixed(3) : l.scale.toFixed(2)} yd`));
+      const above = h('input', { type: 'checkbox', checked: l.above });
+      above.addEventListener('change', () => ed.updateImage(l, 'Underlay on top', { above: above.checked }));
+      parts.push(h('label', { class: 'opt' }, above, 'Show above drawing'));
+      const setScale = h('button', { class: 'small', textContent: 'Set scale…', title: 'Click two points a known distance apart' });
+      setScale.addEventListener('click', () => ed.setTool('scale'));
+      const move = h('button', { class: 'small', textContent: 'Move', title: 'Drag the image (U)' });
+      move.addEventListener('click', () => ed.setTool('underlay'));
+      parts.push(h('div', { class: 'btn-row' }, setScale, move));
+    }
     const sel = ed.selected();
     if (sel) {
       const f = sel.feature;
@@ -486,10 +543,63 @@ export function buildInfoPanel(ed: Editor): void {
   ed.on('selection', render);
   ed.on('doc', render);
   ed.on('tool', render);
+  ed.on('holes', render);
   // ruler updates arrive as 'status' (frequent) — only re-render when a ruler exists
   ed.on('status', () => {
     if (ed.ruler.points.length || body.querySelector('.info-head')?.textContent === 'Measurement') render();
   });
+  render();
+}
+
+// =====================================================================
+// Scorecard
+// =====================================================================
+export function buildScorecard(ed: Editor): void {
+  const panel = $('#scorecard-panel');
+  const body = h('div', { class: 'scorecard' });
+  panel.append(h('div', { class: 'panel-title', textContent: 'Scorecard' }), body);
+  const render = () => {
+    const holes = [...ed.doc.holes].sort((a, b) => a.number - b.number);
+    if (!holes.length) {
+      body.replaceChildren(h('div', { class: 'tip', textContent: 'No holes yet. Pick the Hole tool (O): click the tee, any aim points, then double‑click the green.' }));
+      return;
+    }
+    const table = h('table');
+    table.append(h('tr', {}, h('th', { textContent: 'Hole' }), h('th', { textContent: 'Par' }), h('th', { textContent: 'Yards' })));
+    const total = (hs: typeof holes, label: string) =>
+      h(
+        'tr',
+        { class: 'total' },
+        h('td', { textContent: label }),
+        h('td', { textContent: String(hs.reduce((n, x) => n + x.par, 0)) }),
+        h('td', { textContent: hs.reduce((n, x) => n + holeYards(x), 0).toLocaleString() }),
+      );
+    const front = holes.filter((x) => x.number <= 9);
+    const back = holes.filter((x) => x.number > 9);
+    const split = front.length > 0 && back.length > 0;
+    for (const x of holes) {
+      const tr = h(
+        'tr',
+        { class: x.id === ed.selectedHoleId ? 'sel' : '' },
+        h('td', { textContent: String(x.number) }),
+        h('td', { textContent: String(x.par) }),
+        h('td', { textContent: holeYards(x).toLocaleString() }),
+      );
+      tr.addEventListener('click', () => {
+        ed.selectHole(x.id);
+        const mid = x.points[Math.floor(x.points.length / 2)];
+        ed.centerOn(mid);
+      });
+      table.append(tr);
+      if (split && x === front[front.length - 1]) table.append(total(front, 'Out'));
+    }
+    if (split) table.append(total(back, 'In'));
+    table.append(total(holes, 'Total'));
+    body.replaceChildren(table);
+  };
+  ed.on('holes', render);
+  ed.on('history', render);
+  ed.on('doc', render);
   render();
 }
 

@@ -1,4 +1,4 @@
-import type { CourseDoc, Layer, RasterLayer, VectorLayer } from './types';
+import type { CourseDoc, ImageLayer, ImagePlacement, Layer, RasterLayer, VectorLayer } from './types';
 
 let seq = 0;
 export function uid(prefix: string): string {
@@ -12,6 +12,31 @@ export function createRasterLayer(name: string, w: number, h: number): RasterLay
 
 export function createVectorLayer(name: string): VectorLayer {
   return { id: uid('L'), kind: 'vector', name, visible: true, locked: false, features: [] };
+}
+
+export function createImageLayer(name: string, src: string, imgW: number, imgH: number, placement: Partial<ImagePlacement> = {}): ImageLayer {
+  return {
+    id: uid('L'),
+    kind: 'image',
+    name,
+    visible: true,
+    locked: false,
+    src,
+    imgW,
+    imgH,
+    x: 0,
+    y: 0,
+    scale: 1,
+    rotation: 0,
+    opacity: 0.6,
+    above: false,
+    ...placement,
+  };
+}
+
+/** Par guess from yardage (men's USGA guidelines). */
+export function suggestPar(yards: number): number {
+  return yards <= 250 ? 3 : yards <= 470 ? 4 : yards <= 690 ? 5 : 6;
 }
 
 export interface NewDocOptions {
