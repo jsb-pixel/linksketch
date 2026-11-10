@@ -950,7 +950,7 @@ export class HoleTool implements Tool {
       return;
     }
     if (this.pts.length) this.live = clampWorld(ed, e.world);
-    else ed.canvas.style.cursor = this.hitPoint(e.screen) ? 'move' : this.hitLine(e.screen) ? 'pointer' : this.cursor;
+    else ed.canvas.style.cursor = this.hitPoint(e.screen) ? 'move' : this.hitLine(e.screen) ? 'pointer' : ed.cursorCss(this.cursor);
   }
 
   up(): void {

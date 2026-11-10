@@ -7,6 +7,7 @@ import { createImageLayer } from './model/doc';
 import { drawHoles } from './editor/holes';
 import { loadImageBlob } from './editor/underlay';
 import { drawTerrain } from './terrain/render';
+import { CURSOR_STYLES } from './editor/cursors';
 import { createTerrain } from './terrain/terrain';
 import { MAP_SOURCES } from './editor/maptiles';
 import { formatLatLon, parseCoords } from './geo/geo';
@@ -714,6 +715,17 @@ export class App {
             checked: () => ed.showYardGrid && ed.yardGridSize === n,
             action: () => ed.setYardGrid(n),
           })),
+          { separator: true, label: '' },
+          ...CURSOR_STYLES.map((c) => ({
+            label: `Cursor: ${c.name}`,
+            checked: () => ed.cursorStyle === c.id,
+            action: () => ed.setCursorStyle(c.id),
+          })),
+          {
+            label: 'Outline the pixel under the cursor (zoomed in)',
+            checked: () => ed.showPixelTarget,
+            action: () => ed.setPixelTarget(!ed.showPixelTarget),
+          },
           { separator: true, label: '' },
           ...[4, 8, 12, 16].map((z) => ({
             label: `Pixel grid from ${z * 100}% zoom`,

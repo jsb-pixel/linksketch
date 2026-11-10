@@ -7,6 +7,7 @@ import { drawHoles } from './holes';
 import { drawUnderlay, drawUnderlayFrame } from './underlay';
 import { drawAttribution, drawMap, MAP_SOURCES } from './maptiles';
 import { drawTerrain } from '../terrain/render';
+import { cssCursor, type CursorStyle } from './cursors';
 import { heightAtPx, minMax, type BrushMode, type Terrain } from '../terrain/terrain';
 import { ELEVATION_ATTRIBUTION, fetchUsgsTerrain } from '../terrain/usgs';
 import { geoWithPointAt } from '../geo/geo';
@@ -930,10 +931,59 @@ export class Editor {
     this.drawRegion(ctx);
     this.drawRuler(ctx);
     this.tool.overlay?.(ctx);
+    this.drawPixelTarget(ctx);
     this.drawDocHandles(ctx);
     const credits = maps.map((m) => MAP_SOURCES[m.source].attribution);
     if (tl?.visible && this.doc.terrain?.source === 'usgs') credits.push(ELEVATION_ATTRIBUTION);
     if (credits.length) drawAttribution(ctx, [...new Set(credits)].join(' · '), this.cssW, this.cssH);
+  }
+
+  /** How drawing tools show the pointer (remembered). */
+  cursorStyle: CursorStyle = 'offset';
+  /** Outline the exact pixel under the pointer when zoomed in. */
+  showPixelTarget = true;
+
+  cursorCss(name: string): string {
+    return cssCursor(name, this.cursorStyle);
+  }
+
+  setCursorStyle(s: CursorStyle): void {
+    this.cursorStyle = s;
+    this.saveViewPrefs();
+    this.updateCursor();
+  }
+
+  setPixelTarget(on: boolean): void {
+    this.showPixelTarget = on;
+    this.saveViewPrefs();
+    this.requestFrame();
+  }
+
+  /** Thin outline around the doc pixel under the pointer (pixel tools, zoomed in). */
+  private drawPixelTarget(ctx: CanvasRenderingContext2D): void {
+    const h = this.hover;
+    if (!h || !this.showPixelTarget || this.zoom < 4 || this.panning || this.spaceHeld) return;
+    if (!['pencil', 'brush', 'fill', 'eraser', 'picker', 'wand', 'spray'].includes(this.tool.id)) return;
+    const x = Math.floor(h.px.x);
+    const y = Math.floor(h.px.y);
+    if (x < 0 || y < 0 || x >= this.doc.width || y >= this.doc.height) return;
+    const c = [
+      { x, y },
+      { x: x + 1, y },
+      { x: x + 1, y: y + 1 },
+      { x, y: y + 1 },
+    ].map((p) => this.pxToScreen(p));
+    ctx.save();
+    ctx.beginPath();
+    c.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+    ctx.restore();
   }
 
   setYardGrid(size: 0 | 25 | 50 | 100): void {
@@ -965,7 +1015,8 @@ export class Editor {
       if (typeof p.showYardGrid === 'boolean') this.showYardGrid = p.showYardGrid;
       if ([25, 50, 100].includes(p.yardGridSize)) this.yardGridSize = p.yardGridSize;
       if (typeof p.pixelGridZoom === 'number') this.pixelGridZoom = p.pixelGridZoom;
-      for (const k of ['showHoles', 'arcsFromTee', 'arcsToGreen'] as const) if (typeof p[k] === 'boolean') this[k] = p[k];
+      for (const k of ['showHoles', 'arcsFromTee', 'arcsToGreen', 'showPixelTarget'] as const) if (typeof p[k] === 'boolean') this[k] = p[k];
+      if (['offset', 'gap', 'standard'].includes(p.cursorStyle)) this.cursorStyle = p.cursorStyle;
     } catch {
       /* storage unavailable — use defaults */
     }
@@ -973,10 +1024,10 @@ export class Editor {
 
   private saveViewPrefs(): void {
     try {
-      const { showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen } = this;
+      const { showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget } = this;
       localStorage.setItem(
         'fairway-view',
-        JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen }),
+        JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget }),
       );
     } catch {
       /* ignore */
@@ -1148,7 +1199,7 @@ export class Editor {
 
   // ---------------------------------------------------------------- input
   updateCursor(): void {
-    this.canvas.style.cursor = this.panning ? 'grabbing' : this.spaceHeld ? 'grab' : this.tool?.cursor ?? 'default';
+    this.canvas.style.cursor = this.panning ? 'grabbing' : this.spaceHeld ? 'grab' : this.cursorCss(this.tool?.cursor ?? 'default');
   }
 
   private info(e: PointerEvent | MouseEvent, clicks = 1): PointerInfo {
