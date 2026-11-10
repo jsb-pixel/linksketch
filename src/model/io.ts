@@ -59,9 +59,11 @@ export function serialize(doc: CourseDoc): string {
     yardsPerPixel: doc.yardsPerPixel,
     background: doc.background,
     colors: doc.colors,
+    geo: doc.geo,
     surfaceTable: SURFACES.map((s) => s.id),
     layers: doc.layers.map((l) => {
       const base = { id: l.id, name: l.name, visible: l.visible, locked: l.locked, kind: l.kind };
+      if (l.kind === 'map') return { ...base, source: l.source, opacity: l.opacity };
       if (l.kind === 'image') {
         const { src, imgW, imgH, x, y, scale, rotation, opacity, above } = l;
         return { ...base, src, imgW, imgH, x, y, scale, rotation, opacity, above };
@@ -97,6 +99,14 @@ export function deserialize(text: string): CourseDoc {
 
   const layers: Layer[] = (j.layers ?? []).map((l: any): Layer => {
     const base = { id: String(l.id), name: String(l.name), visible: !!l.visible, locked: !!l.locked };
+    if (l.kind === 'map') {
+      return {
+        ...base,
+        kind: 'map',
+        source: l.source === 'esri' ? 'esri' : 'usgs',
+        opacity: Math.max(0, Math.min(1, Number.isFinite(+l.opacity) ? +l.opacity : 1)),
+      };
+    }
     if (l.kind === 'image') {
       const num = (v: unknown, d: number) => (Number.isFinite(+(v as number)) ? +(v as number) : d);
       return {
@@ -137,6 +147,10 @@ export function deserialize(text: string): CourseDoc {
     yardsPerPixel: +j.yardsPerPixel || 1,
     background: String(j.background ?? 'white'),
     colors: parseColors(j.colors),
+    geo:
+      j.geo && Number.isFinite(+j.geo.lat) && Number.isFinite(+j.geo.lon) && Math.abs(+j.geo.lat) < 85
+        ? { lat: +j.geo.lat, lon: +j.geo.lon }
+        : undefined,
     layers,
     holes: Array.isArray(j.holes)
       ? j.holes

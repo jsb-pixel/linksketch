@@ -3,6 +3,7 @@ import { suggestPar, uid } from '../model/doc';
 import { rgbCss, surfaceCode, surfaceColor } from '../model/surfaces';
 import type { Feature, ImageLayer, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
 import { dialog, field } from '../ui/ui';
+import { worldToLatLon, type GeoRef } from '../geo/geo';
 import { drawPlayLine } from './holes';
 import { flatten, visibleCodes } from '../render/raster';
 import { floodRegion, forEachPixel } from '../render/regions';
@@ -562,17 +563,27 @@ abstract class StampTool implements Tool {
     if (!h) return;
     const s = this.size();
     const off = Math.floor((s - 1) / 2);
-    const tl = this.ed.pxToScreen({ x: Math.floor(h.px.x) - off, y: Math.floor(h.px.y) - off });
-    const w = s * this.ed.zoom;
+    const x0 = Math.floor(h.px.x) - off;
+    const y0 = Math.floor(h.px.y) - off;
     ctx.save();
     ctx.strokeStyle = '#000';
     ctx.lineWidth = 1;
-    if (this.square() || s <= 2) ctx.strokeRect(Math.round(tl.x) + 0.5, Math.round(tl.y) + 0.5, Math.round(w), Math.round(w));
-    else {
-      ctx.beginPath();
-      ctx.arc(tl.x + w / 2, tl.y + w / 2, w / 2, 0, Math.PI * 2);
-      ctx.stroke();
+    ctx.beginPath();
+    if (this.square() || s <= 2) {
+      // a square of doc pixels — turns with the view
+      const c = [
+        { x: x0, y: y0 },
+        { x: x0 + s, y: y0 },
+        { x: x0 + s, y: y0 + s },
+        { x: x0, y: y0 + s },
+      ].map((p) => this.ed.pxToScreen(p));
+      c.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+    } else {
+      const c = this.ed.pxToScreen({ x: x0 + s / 2, y: y0 + s / 2 });
+      ctx.arc(c.x, c.y, (s * this.ed.zoom) / 2, 0, Math.PI * 2);
     }
+    ctx.stroke();
     ctx.restore();
   }
 }
@@ -729,7 +740,7 @@ export class WandTool implements Tool {
     if (x < 0 || y < 0 || x >= W || y >= ed.doc.height) return ed.setRegion(null);
     for (let i = ed.doc.layers.length - 1; i >= 0; i--) {
       const layer = ed.doc.layers[i];
-      if (!layer.visible || layer.kind === 'image') continue;
+      if (!layer.visible || (layer.kind !== 'raster' && layer.kind !== 'vector')) continue;
       if (layer.kind === 'vector') {
         // A shape on top of the paint: select the shape instead.
         const hit = ed.hitFeature(e.world);
@@ -1036,8 +1047,14 @@ export class UnderlayTool implements Tool {
   name = 'Move underlay image';
   key = 'u';
   cursor = 'move';
-  hint = 'Drag to move the underlay image · arrows nudge (⇧ = 10 yd) · opacity, rotation and scale are in the Info panel';
+  hint = 'Drag to move the underlay image (or the satellite map, if that layer is selected) · arrows nudge (⇧ = 10 yd)';
   private drag: { layer: ImageLayer; start: Vec2; ox: number; oy: number } | null = null;
+  private mapDrag: { start: Vec2; geo: GeoRef } | null = null;
+
+  /** With the map layer selected, this tool slides the map under the course. */
+  private mapMode(): boolean {
+    return this.ed.activeLayer?.kind === 'map' && !!this.ed.doc.geo;
+  }
 
   constructor(private ed: Editor) {}
 
@@ -1052,6 +1069,13 @@ export class UnderlayTool implements Tool {
   }
 
   down(e: PointerInfo): void {
+    if (this.mapMode()) {
+      if (this.ed.activeLayer?.locked) return this.ed.setMessage('The map is locked — unlock it in the Layers panel.');
+      this.ed.history.begin('Move map');
+      this.ed.history.snapshotGeo();
+      this.mapDrag = { start: e.world, geo: { ...this.ed.doc.geo! } };
+      return;
+    }
     const l = this.target();
     if (!l) return;
     if (this.ed.activeLayerId !== l.id) this.ed.setActiveLayer(l.id);
@@ -1060,25 +1084,43 @@ export class UnderlayTool implements Tool {
     this.drag = { layer: l, start: e.world, ox: l.x, oy: l.y };
   }
   move(e: PointerInfo, dragging: boolean): void {
+    const m = this.mapDrag;
+    if (m && dragging) {
+      const ll = worldToLatLon(m.geo, { x: m.start.x - e.world.x, y: m.start.y - e.world.y });
+      this.ed.doc.geo = { lat: ll.lat, lon: ll.lon };
+      return;
+    }
     const d = this.drag;
     if (!d || !dragging) return;
     d.layer.x = d.ox + e.world.x - d.start.x;
     d.layer.y = d.oy + e.world.y - d.start.y;
   }
   up(): void {
-    if (!this.drag) return;
+    if (!this.drag && !this.mapDrag) return;
     this.drag = null;
+    this.mapDrag = null;
     this.ed.history.commit();
     this.ed.emit('selection');
   }
   cancel(): void {
-    if (this.drag) this.ed.history.abort();
+    if (this.drag || this.mapDrag) this.ed.history.abort();
     this.drag = null;
+    this.mapDrag = null;
   }
   keydown(e: KeyboardEvent): boolean {
     const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     const a = arrows[e.key];
     if (!a) return false;
+    const step0 = e.shiftKey ? 10 : 1;
+    if (this.mapMode()) {
+      const g = this.ed.doc.geo!;
+      this.ed.history.begin('Nudge map');
+      this.ed.history.snapshotGeo();
+      const ll = worldToLatLon(g, { x: -a[0] * step0, y: -a[1] * step0 });
+      this.ed.doc.geo = { lat: ll.lat, lon: ll.lon };
+      this.ed.history.commit();
+      return true;
+    }
     const l = this.target();
     if (!l) return true;
     const step = e.shiftKey ? 10 : 1;

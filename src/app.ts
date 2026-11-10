@@ -6,6 +6,9 @@ import { SURFACES, rgbCss, surfaceById, surfaceColor, surfaceColor2, type ColorM
 import { createImageLayer } from './model/doc';
 import { drawHoles } from './editor/holes';
 import { loadImageBlob } from './editor/underlay';
+import { MAP_SOURCES } from './editor/maptiles';
+import { formatLatLon, parseCoords } from './geo/geo';
+import type { MapSource } from './model/types';
 import { THEMES } from './model/themes';
 import {
   buildInfoPanel,
@@ -286,6 +289,7 @@ export class App {
       else if (file.name.endsWith(FILE_EXT)) void file.text().then((t) => this.loadText(t, file.name));
     });
     window.addEventListener('fairway:import-image', () => void this.importImageDialog());
+    window.addEventListener('fairway:place-on-map', () => this.placeOnMapDialog());
   }
 
   private loadText(text: string, name: string): void {
@@ -299,6 +303,153 @@ export class App {
     } catch (err) {
       alert(`Could not open: ${(err as Error).message}`);
     }
+  }
+
+  // ------------------------------------------------------------ real-world placement
+  placeOnMapDialog(): void {
+    const ed = this.ed;
+    const query = h('input', { placeholder: 'e.g. Pebble Beach Golf Links, an address, or 36.568, -121.950', class: 'wide' });
+    const go = h('button', { textContent: 'Search' });
+    const results = h('div', { class: 'results' });
+    const source = h('select');
+    for (const s of Object.values(MAP_SOURCES)) source.append(h('option', { value: s.id, textContent: s.name }));
+    source.value = ed.mapLayer()?.source ?? 'usgs';
+    const license = h('small');
+    const syncLicense = () => (license.textContent = MAP_SOURCES[source.value as MapSource].license);
+    source.addEventListener('change', syncLicense);
+    syncLicense();
+    let chosen: { lat: number; lon: number; label: string } | null = null;
+
+    const choose = (c: { lat: number; lon: number; label: string }, row?: HTMLElement) => {
+      chosen = c;
+      results.querySelectorAll('.result').forEach((r) => r.classList.remove('sel'));
+      row?.classList.add('sel');
+    };
+    const show = (items: { lat: number; lon: number; label: string; golf?: boolean }[], note?: string) => {
+      results.replaceChildren();
+      if (note) results.append(h('div', { class: 'tip', textContent: note }));
+      items.forEach((it, i) => {
+        const r = h('div', { class: 'result', textContent: `${it.golf ? '⛳ ' : ''}${it.label}` });
+        r.addEventListener('click', () => choose(it, r));
+        r.addEventListener('dblclick', () => {
+          choose(it, r);
+          place();
+        });
+        results.append(r);
+        if (i === 0) choose(it, r);
+      });
+    };
+    const search = async () => {
+      const q = query.value.trim();
+      if (!q) return;
+      const c = parseCoords(q);
+      if (c) return show([{ ...c, label: `Coordinates ${formatLatLon(c)}` }]);
+      show([], 'Searching…');
+      try {
+        const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=8&countrycodes=us&q=${encodeURIComponent(q)}`;
+        const res = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!res.ok) throw new Error(`search service answered ${res.status}`);
+        const data: { lat: string; lon: string; display_name: string; type?: string; category?: string }[] = await res.json();
+        if (!data.length) return show([], 'No US places found. Try the course name plus its town, or paste coordinates.');
+        const items = data.map((d) => ({ lat: +d.lat, lon: +d.lon, label: d.display_name, golf: d.type === 'golf_course' }));
+        items.sort((a, b) => Number(!!b.golf) - Number(!!a.golf));
+        show(items);
+      } catch (err) {
+        show([], `Search failed (${(err as Error).message}). You can paste coordinates or a Google Maps link instead.`);
+      }
+    };
+    go.addEventListener('click', () => void search());
+    query.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        void search();
+      }
+    });
+    const place = () => {
+      if (!chosen) return false;
+      ed.placeOnMap(chosen.lat, chosen.lon, source.value as MapSource);
+      this.ed.setMessage(`Course placed at ${formatLatLon(chosen)}. Distances now match the real ground. Press U with the map layer selected to slide it.`);
+      closeDlg();
+      return true;
+    };
+    const body = h(
+      'div',
+      { class: 'form' },
+      h('div', { class: 'search-row' }, query, go),
+      h('small', { textContent: 'Search uses OpenStreetMap. You can also paste coordinates or a Google Maps link (only the coordinates are read).' }),
+      results,
+      field('Imagery', source),
+      license,
+      h('small', { textContent: 'The middle of your course goes on the chosen spot. Your drawing does not move.' }),
+    );
+    const buttons = [
+      { label: 'Place course here', primary: true, onClick: () => place() },
+      ...(ed.doc.geo
+        ? [
+            {
+              label: 'Remove from map',
+              onClick: () => {
+                ed.removeFromMap();
+              },
+            },
+          ]
+        : []),
+      { label: 'Cancel', onClick: () => {} },
+    ];
+    const closeDlg = dialog('Place course on map', body, buttons);
+    query.focus();
+  }
+
+  /** Exact course area in yards, growing/shrinking from a chosen anchor. */
+  courseSizeDialog(): void {
+    const ed = this.ed;
+    const k = ed.doc.yardsPerPixel;
+    const w = h('input', { type: 'number', min: '20', step: '10', value: String(Math.round(ed.doc.width * k)), class: 'num' });
+    const ht = h('input', { type: 'number', min: '20', step: '10', value: String(Math.round(ed.doc.height * k)), class: 'num' });
+    // 3×3 anchor: which part of the current course stays put.
+    let anchor = { ax: 0.5, ay: 0.5 };
+    const grid = h('div', { class: 'anchor-grid' });
+    const cells: HTMLButtonElement[] = [];
+    for (let j = 0; j < 3; j++)
+      for (let i = 0; i < 3; i++) {
+        const b = h('button', { class: 'anchor', title: 'Keep this side fixed' });
+        b.addEventListener('click', () => {
+          anchor = { ax: i / 2, ay: j / 2 };
+          cells.forEach((c) => c.classList.toggle('active', c === b));
+        });
+        if (i === 1 && j === 1) b.classList.add('active');
+        cells.push(b);
+        grid.append(b);
+      }
+    const body = h(
+      'div',
+      { class: 'form' },
+      field('Width (yd)', w),
+      field('Height (yd)', ht),
+      field('Anchor', grid, 'Where the current course stays. Middle = grow evenly on all sides.'),
+      h('small', {
+        textContent: `Max about ${Math.round(Math.sqrt(MAX_DOC_PIXELS) * k).toLocaleString()} × ${Math.round(Math.sqrt(MAX_DOC_PIXELS) * k).toLocaleString()} yd at ${k} yd per pixel. Tip: you can also drag the small handles around the course edge.`,
+      }),
+    );
+    dialog('Course size', body, [
+      {
+        label: 'OK',
+        primary: true,
+        onClick: () => {
+          const nw = Math.round(+w.value / k);
+          const nh = Math.round(+ht.value / k);
+          if (!(nw > 0 && nh > 0)) return false;
+          return ed.resizeCourse({
+            x: (ed.doc.width - nw) * anchor.ax,
+            y: (ed.doc.height - nh) * anchor.ay,
+            w: nw,
+            h: nh,
+          });
+        },
+      },
+      { label: 'Cancel', onClick: () => {} },
+    ]);
   }
 
   courseProperties(): void {
@@ -409,6 +560,8 @@ export class App {
           { label: 'Export PNG (4×)', action: () => this.exportPng(4) },
           { separator: true, label: '' },
           { label: 'Course properties…', action: () => this.courseProperties() },
+          { label: 'Course size…', action: () => this.courseSizeDialog() },
+          { label: 'Fit course area to view', action: () => ed.fitAreaToView() },
         ],
       },
       {
@@ -451,6 +604,23 @@ export class App {
         ],
       },
       {
+        title: 'Map',
+        items: [
+          { label: 'Place course on map…', action: () => this.placeOnMapDialog() },
+          { label: 'Fit course area to view', action: () => ed.fitAreaToView() },
+          {
+            label: 'Select map layer',
+            enabled: () => !!ed.mapLayer(),
+            action: () => ed.setActiveLayer(ed.mapLayer()!.id),
+          },
+          {
+            label: 'Remove from map',
+            enabled: () => !!ed.doc.geo,
+            action: () => ed.removeFromMap(),
+          },
+        ],
+      },
+      {
         title: 'View',
         items: [
           { label: 'Show holes', checked: () => ed.showHoles, action: () => ed.setHoleView({ showHoles: !ed.showHoles }) },
@@ -468,6 +638,12 @@ export class App {
           { label: 'Zoom in', shortcut: '⌘+', action: () => ed.zoomStep(1) },
           { label: 'Zoom out', shortcut: '⌘−', action: () => ed.zoomStep(-1) },
           { label: 'Zoom to fit', shortcut: '⌘0', action: () => ed.fit() },
+          { separator: true, label: '' },
+          { label: 'Rotate view 15° clockwise', shortcut: 'R', action: () => ed.rotateView(ed.rotation + 15) },
+          { label: 'Rotate view 15° counter‑clockwise', shortcut: '⇧R', action: () => ed.rotateView(ed.rotation - 15) },
+          { label: 'Rotate view 90° clockwise', action: () => ed.rotateView(ed.rotation + 90) },
+          { label: 'Point selected hole up', enabled: () => !!ed.selectedHole(), action: () => ed.pointHoleUp() },
+          { label: 'Reset rotation (north up)', enabled: () => ed.rotation !== 0, action: () => ed.rotateView(0) },
           { label: 'Actual pixels', shortcut: '⌘1', action: () => ed.actualSize() },
           { separator: true, label: '' },
           { label: 'Show yard grid', shortcut: '⌘\'', checked: () => ed.showYardGrid, action: () => ed.toggleYardGrid() },
@@ -532,6 +708,10 @@ export class App {
         return;
       }
       if (k === 'x') return ed.swapSurfaces();
+      if (k === 'r' && !e.altKey) {
+        e.preventDefault();
+        return ed.rotateView(ed.rotation + (e.shiftKey ? -15 : 15));
+      }
       if (e.key === '[') return ed.setBrushSize(ed.brushSize - 1);
       if (e.key === ']') return ed.setBrushSize(ed.brushSize + 1);
       if (e.key === '+' || e.key === '=') return ed.zoomStep(1);
@@ -555,6 +735,7 @@ export class App {
       ['[ / ]', 'Brush size'],
       ['Right‑click / ⌃‑click', 'Paint with the right surface'],
       ['X', 'Swap left/right surfaces'],
+      ['R / ⇧R', 'Rotate the view 15° (trackpad twist in Safari)'],
       ['⌘Z / ⇧⌘Z', 'Undo / Redo'],
       ['⌘D', 'Duplicate shape'],
       ['⌫', 'Delete shape or point'],

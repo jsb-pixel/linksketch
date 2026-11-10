@@ -1,5 +1,8 @@
 import { dist, polygonArea, pathLength } from '../geom/geom';
 import { holeYards } from '../editor/holes';
+import { MAP_SOURCES } from '../editor/maptiles';
+import { formatLatLon, worldToLatLon } from '../geo/geo';
+import type { MapSource } from '../model/types';
 import type { Editor, ToolId } from '../editor/editor';
 import { createRasterLayer, createVectorLayer } from '../model/doc';
 import { SURFACES, customSlotUsed, surfaceById, surfaceCode, surfaceColor, surfacePixel, rgbCss } from '../model/surfaces';
@@ -405,9 +408,13 @@ export function buildLayersPanel(ed: Editor): void {
         }
         const kind = h('span', {
           class: 'kind',
-          title:
-            l.kind === 'raster' ? 'Paint layer (pixels)' : l.kind === 'vector' ? 'Shape layer (editable shapes)' : 'Underlay image (reference only — not exported)',
-          textContent: l.kind === 'raster' ? '▦' : l.kind === 'vector' ? '◆' : '🖼',
+          title: {
+            raster: 'Paint layer (pixels)',
+            vector: 'Shape layer (editable shapes)',
+            image: 'Underlay image (reference only — not exported)',
+            map: 'Satellite map (reference only — not exported)',
+          }[l.kind],
+          textContent: { raster: '▦', vector: '◆', image: '🖼', map: '🌎' }[l.kind],
         });
         const name = h('span', { class: 'name', textContent: l.name });
         const count = l.kind === 'vector' ? h('span', { class: 'count', textContent: `${l.features.length}` }) : '';
@@ -457,9 +464,43 @@ export function buildInfoPanel(ed: Editor): void {
       }
       const del = h('button', { class: 'small', textContent: 'Delete hole' });
       del.addEventListener('click', () => ed.deleteHole(hole.id));
-      parts.push(h('div', { class: 'btn-row' }, del));
+      const up = h('button', { class: 'small', textContent: 'Point up', title: 'Rotate the view so this hole plays straight up' });
+      up.addEventListener('click', () => ed.pointHoleUp());
+      parts.push(h('div', { class: 'btn-row' }, up, del));
     }
     const active = ed.activeLayer;
+    if (active?.kind === 'map') {
+      const l = active;
+      parts.push(h('div', { class: 'info-head', textContent: 'Satellite map' }));
+      if (ed.doc.geo) {
+        const k = ed.doc.yardsPerPixel;
+        const c = worldToLatLon(ed.doc.geo, { x: (ed.doc.width * k) / 2, y: (ed.doc.height * k) / 2 });
+        parts.push(row('Center', formatLatLon(c)));
+      }
+      const src = h('select');
+      for (const s of Object.values(MAP_SOURCES)) src.append(h('option', { value: s.id, textContent: s.name, selected: s.id === l.source }));
+      src.addEventListener('change', () => ed.updateMap(l, 'Imagery source', { source: src.value as MapSource }));
+      parts.push(src);
+      parts.push(h('div', { class: 'tip', textContent: MAP_SOURCES[l.source].license }));
+      const op = h('input', { type: 'range', min: '0', max: '100', value: String(Math.round(l.opacity * 100)) });
+      let before = l.opacity;
+      op.addEventListener('pointerdown', () => (before = l.opacity));
+      op.addEventListener('input', () => {
+        l.opacity = +op.value / 100;
+        ed.requestFrame();
+      });
+      op.addEventListener('change', () => {
+        const v = l.opacity;
+        l.opacity = before;
+        ed.updateMap(l, 'Map opacity', { opacity: v });
+      });
+      parts.push(h('div', { class: 'kv' }, h('span', { textContent: 'Opacity' }), op));
+      const relocate = h('button', { class: 'small', textContent: 'Change location…' });
+      relocate.addEventListener('click', () => window.dispatchEvent(new Event('fairway:place-on-map')));
+      const move = h('button', { class: 'small', textContent: 'Slide', title: 'Drag the map under the course (U)' });
+      move.addEventListener('click', () => ed.setTool('underlay'));
+      parts.push(h('div', { class: 'btn-row' }, relocate, move));
+    }
     if (active?.kind === 'image') {
       const l = active;
       parts.push(h('div', { class: 'info-head', textContent: 'Underlay image' }));
@@ -612,13 +653,22 @@ export function buildStatusBar(ed: Editor): void {
   const pos = h('div', { class: 'cell', title: 'Cursor position (yards)' });
   const layer = h('div', { class: 'cell', title: 'Active layer' });
   const zoom = h('div', { class: 'cell', title: 'Zoom' });
-  bar.append(hint, layer, pos, zoom);
+  const rot = h('input', { type: 'number', step: '1', class: 'rot', title: 'View rotation in degrees (R / ⇧R turns 15°)' });
+  rot.addEventListener('change', () => {
+    ed.rotateView(+rot.value || 0);
+    rot.blur();
+  });
+  const rotCell = h('label', { class: 'cell rot-cell', title: 'View rotation' }, '↻ ', rot, '°');
+  bar.append(hint, layer, pos, rotCell, zoom);
   const render = () => {
     hint.textContent = ed.message || ed.tool.hint;
     const hv = ed.hover;
-    pos.textContent = hv ? `${Math.round(hv.world.x)}, ${Math.round(hv.world.y)} yd` : '';
+    pos.textContent = hv
+      ? `${Math.round(hv.world.x)}, ${Math.round(hv.world.y)} yd${ed.doc.geo ? `  ·  ${formatLatLon(worldToLatLon(ed.doc.geo, hv.world))}` : ''}`
+      : '';
     layer.textContent = ed.activeLayer ? `${ed.activeLayer.kind === 'raster' ? '▦' : '◆'} ${ed.activeLayer.name}` : '';
     zoom.textContent = `${Math.round(ed.zoom * 100)}%`;
+    if (document.activeElement !== rot) rot.value = String(Math.round(ed.rotation * 10) / 10);
   };
   ed.on('status', render);
   ed.on('view', render);

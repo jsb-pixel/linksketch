@@ -105,7 +105,7 @@ export function renderRegion(doc: CourseDoc, r: Rect): Uint32Array {
   const oy = r.y - ex.y;
 
   for (const layer of doc.layers) {
-    if (!layer.visible || layer.kind === 'image') continue;
+    if (!layer.visible || (layer.kind !== 'raster' && layer.kind !== 'vector')) continue;
     let codes: Uint8Array;
     let outlines = true;
     if (layer.kind === 'raster') {
@@ -193,7 +193,7 @@ export function visibleCodes(doc: CourseDoc): Uint8Array {
   const full = { x: 0, y: 0, w: W, h: H };
   const map = new Uint8Array(W * H).fill(surfaceCode(doc.background) || surfaceCode('white'));
   for (const layer of doc.layers) {
-    if (!layer.visible || layer.kind === 'image') continue;
+    if (!layer.visible || (layer.kind !== 'raster' && layer.kind !== 'vector')) continue;
     const codes = layer.kind === 'raster' ? layer.pixels : rasterizeVectorLayer(layer, full, doc.yardsPerPixel);
     if (!codes) continue;
     for (let i = 0; i < map.length; i++) if (codes[i]) map[i] = codes[i];

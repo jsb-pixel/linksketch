@@ -644,3 +644,67 @@ select.num {
   outline: 3px dashed #0a64ff;
   outline-offset: -6px;
 }
+
+.search-row {
+  display: flex;
+  gap: 6px;
+}
+.search-row input {
+  flex: 1;
+  min-width: 300px;
+}
+.results {
+  background: #fff;
+  max-height: 180px;
+  overflow: auto;
+  box-shadow:
+    inset -1px -1px var(--light),
+    inset 1px 1px var(--shadow),
+    inset -2px -2px #dfdfdf,
+    inset 2px 2px var(--dark);
+  padding: 2px;
+  min-height: 24px;
+}
+.results:empty {
+  display: none;
+}
+.result {
+  padding: 2px 4px;
+  cursor: default;
+}
+.result:hover {
+  background: #e6e6ff;
+}
+.result.sel {
+  background: var(--hl);
+  color: #fff;
+}
+
+.anchor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 20px);
+  gap: 2px;
+}
+.anchor-grid .anchor {
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+}
+.anchor-grid .anchor.active {
+  background: var(--hl);
+  box-shadow: none;
+}
+
+.rot-cell {
+  display: flex;
+  align-items: center;
+  min-width: 0 !important;
+}
+.rot-cell input.rot {
+  width: 48px;
+  padding: 0 2px;
+  box-shadow: none;
+  background: transparent;
+  text-align: right;
+}

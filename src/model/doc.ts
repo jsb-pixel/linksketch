@@ -1,4 +1,4 @@
-import type { CourseDoc, ImageLayer, ImagePlacement, Layer, RasterLayer, VectorLayer } from './types';
+import type { CourseDoc, ImageLayer, ImagePlacement, Layer, MapLayer, MapSource, RasterLayer, VectorLayer } from './types';
 
 let seq = 0;
 export function uid(prefix: string): string {
@@ -32,6 +32,10 @@ export function createImageLayer(name: string, src: string, imgW: number, imgH: 
     above: false,
     ...placement,
   };
+}
+
+export function createMapLayer(source: MapSource = 'usgs'): MapLayer {
+  return { id: uid('L'), kind: 'map', name: 'Satellite map', visible: true, locked: false, source, opacity: 1 };
 }
 
 /** Par guess from yardage (men's USGA guidelines). */

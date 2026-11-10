@@ -146,8 +146,21 @@ Active surface is shown like Paint's fg/bg swatch.
   Original v0.2 plan: — Hole tool (tee → aim points → green), par, auto
   yardage along centerline, distance arcs, scorecard panel; image underlay with
   opacity and "set scale by known distance".
-- **v0.3 Real land** — place a document on a map (US); satellite underlay
+- **v0.3 Real land** ✅ built 2026‑11‑09: Map → Place course on map (search via OpenStreetMap
+  Nominatim, or paste coordinates / Google Maps link — only coordinates are read); `doc.geo`
+  pins yard (0,0) to lat/lon, yards ↔ Web Mercator via 1/cos φ (<0.2% error over a course);
+  satellite map layer (USGS public domain by default, max z16 ≈ 2 m/px; Esri World Imagery
+  optional, z19); tile cache + blurry ancestor placeholders; attribution always drawn;
+  lat/lon in status bar; slide map with U. Never exported.
+  **Before charging money:** Esri imagery needs an Esri (ArcGIS Location Platform) license or
+  must be removed/kept free‑tier personal; public Nominatim is for light use only — switch to
+  a paid geocoder (or self‑host) at launch.
+  Original v0.3 plan: — place a document on a map (US); satellite underlay
   (Esri World Imagery / USGS NAIP — *not* Google, whose terms forbid tracing).
+- **v0.3.x** ✅ Course area resize (edge handles on all sides, Course size dialog with anchor,
+  Fit course area to view — keeps paint/shapes/holes/underlays/geo aligned, one undo step).
+  View rotation (R/⇧R, angle box, Safari trackpad twist, “Point hole up”): only the *view*
+  turns — the course grid, yardages and exports stay north‑up.
 - **v0.4 Terrain** — USGS 3DEP elevation → contour + hillshade layers; per‑hole
   elevation change; paintable fictional terrain (raise/lower brush).
 - **v0.5 Strategy mode** — shot‑pattern ellipses (by handicap + club) placed on

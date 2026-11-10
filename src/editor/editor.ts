@@ -2,13 +2,16 @@ import { dist, pixelRect, rectUnion } from '../geom/geom';
 import { findLayer } from '../model/doc';
 import { History } from '../model/history';
 import { surfaceByCode, surfaceById } from '../model/surfaces';
-import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
+import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, MapLayer, MapSource, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
 import { drawHoles } from './holes';
 import { drawUnderlay, drawUnderlayFrame } from './underlay';
+import { drawAttribution, drawMap, MAP_SOURCES } from './maptiles';
+import { geoWithPointAt } from '../geo/geo';
 import { featureContains, flatten, renderRegion, sortedFeatures } from '../render/raster';
 import { forEachPixel, regionEdges, traceOutline, type Region } from '../render/regions';
 import { applyColors, rgbCss, surfaceCode, surfaceColor, type ColorMap, type SurfaceColors } from '../model/surfaces';
-import { uid } from '../model/doc';
+import { createMapLayer, MAX_DOC_PIXELS, uid } from '../model/doc';
+import { MIN_SIDE_PX, resizeDoc } from '../model/resize';
 
 export type ToolId =
   | 'select'
@@ -87,6 +90,18 @@ export interface Ruler {
   live: Vec2 | null;
   active: boolean;
 }
+
+type DocHandle = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+const HANDLE_CURSORS: Record<DocHandle, string> = {
+  n: 'ns-resize',
+  s: 'ns-resize',
+  e: 'ew-resize',
+  w: 'ew-resize',
+  ne: 'nesw-resize',
+  sw: 'nesw-resize',
+  nw: 'nwse-resize',
+  se: 'nwse-resize',
+};
 
 const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 40;
@@ -169,6 +184,7 @@ export class Editor {
     this.doc = doc;
     this.history = new History(doc);
     this.history.onChange = () => {
+      this.syncCanvasSize();
       if (this.selectedHoleId && !this.doc.holes.some((h) => h.id === this.selectedHoleId)) this.selectedHoleId = null;
       this.requestFrame();
       this.syncColors();
@@ -238,20 +254,77 @@ export class Editor {
   /** Pan so a world point is in the middle of the view. */
   centerOn(w: Vec2): void {
     const p = this.worldToPx(w);
-    this.panX = this.cssW / 2 - p.x * this.zoom;
-    this.panY = this.cssH / 2 - p.y * this.zoom;
+    this.panX = this.cssW / 2 - (p.x * this.cos - p.y * this.sin) * this.zoom;
+    this.panY = this.cssH / 2 - (p.x * this.sin + p.y * this.cos) * this.zoom;
     this.emit('view');
     this.requestFrame();
   }
 
   /** World rectangle currently visible. */
+  /** World rectangle covering everything visible (its bounding box when rotated). */
   visibleWorld(): { x: number; y: number; w: number; h: number } {
-    const a = this.pxToWorld(this.screenToPx({ x: 0, y: 0 }));
-    const b = this.pxToWorld(this.screenToPx({ x: this.cssW, y: this.cssH }));
-    return { x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y };
+    const pts = [
+      { x: 0, y: 0 },
+      { x: this.cssW, y: 0 },
+      { x: this.cssW, y: this.cssH },
+      { x: 0, y: this.cssH },
+    ].map((s) => this.pxToWorld(this.screenToPx(s)));
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
   }
 
   // ---------------------------------------------------------------- underlays
+  // ---------------------------------------------------------------- real-world placement
+  mapLayer(): MapLayer | null {
+    return (this.doc.layers.find((l) => l.kind === 'map') as MapLayer) ?? null;
+  }
+
+  /** Put the course on Earth with (lat, lon) at the middle of the course. */
+  placeOnMap(lat: number, lon: number, source: MapSource): void {
+    const k = this.doc.yardsPerPixel;
+    const center = { x: (this.doc.width * k) / 2, y: (this.doc.height * k) / 2 };
+    this.history.begin('Place on map');
+    this.history.snapshotGeo();
+    this.history.snapshotLayers();
+    this.doc.geo = geoWithPointAt(lat, lon, center);
+    let map = this.mapLayer();
+    if (map) {
+      this.history.snapshotMap(map);
+      map.source = source;
+      map.visible = true;
+    } else {
+      map = createMapLayer(source);
+      this.doc.layers = [map, ...this.doc.layers];
+    }
+    this.history.commit();
+    this.activeLayerId = map.id;
+    this.emit('doc', 'selection');
+    this.fit();
+  }
+
+  removeFromMap(): void {
+    this.history.begin('Remove from map');
+    this.history.snapshotGeo();
+    this.history.snapshotLayers();
+    this.doc.geo = undefined;
+    this.doc.layers = this.doc.layers.filter((l) => l.kind !== 'map');
+    this.history.commit();
+    this.emit('doc', 'selection');
+    this.requestFrame();
+  }
+
+  updateMap(l: MapLayer, label: string, change: Partial<Pick<MapLayer, 'source' | 'opacity'>>): void {
+    this.history.begin(label);
+    this.history.snapshotMap(l);
+    Object.assign(l, change);
+    this.history.commit();
+    this.emit('selection');
+    this.requestFrame();
+  }
+
   /** The underlay that underlay tools act on: active layer, else top‑most visible. */
   activeImage(): ImageLayer | null {
     const a = this.activeLayer;
@@ -436,7 +509,7 @@ export class Editor {
     if (x < 0 || y < 0 || x >= this.doc.width || y >= this.doc.height) return this.doc.background;
     for (let i = this.doc.layers.length - 1; i >= 0; i--) {
       const layer = this.doc.layers[i];
-      if (!layer.visible || layer.kind === 'image') continue;
+      if (!layer.visible || (layer.kind !== 'raster' && layer.kind !== 'vector')) continue;
       if (layer.kind === 'raster') {
         const c = layer.pixels[y * this.doc.width + x];
         if (c) return surfaceByCode(c)?.id ?? this.doc.background;
@@ -592,10 +665,15 @@ export class Editor {
 
   // ---------------------------------------------------------------- coordinates
   screenToPx(s: Vec2): Vec2 {
-    return { x: (s.x - this.panX) / this.zoom, y: (s.y - this.panY) / this.zoom };
+    const dx = (s.x - this.panX) / this.zoom;
+    const dy = (s.y - this.panY) / this.zoom;
+    return { x: dx * this.cos + dy * this.sin, y: -dx * this.sin + dy * this.cos };
   }
   pxToScreen(p: Vec2): Vec2 {
-    return { x: p.x * this.zoom + this.panX, y: p.y * this.zoom + this.panY };
+    return {
+      x: (p.x * this.cos - p.y * this.sin) * this.zoom + this.panX,
+      y: (p.x * this.sin + p.y * this.cos) * this.zoom + this.panY,
+    };
   }
   worldToPx(w: Vec2): Vec2 {
     const k = this.doc.yardsPerPixel;
@@ -611,13 +689,52 @@ export class Editor {
 
   // ---------------------------------------------------------------- view
   zoomAt(screen: Vec2, z: number): void {
+    this.viewAt(screen, z, this.rotation);
+  }
+
+  /** Set zoom and rotation, keeping the course point under `screen` fixed. */
+  viewAt(screen: Vec2, z: number, rotationDeg: number): void {
     z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
     const p = this.screenToPx(screen);
     this.zoom = z;
-    this.panX = screen.x - p.x * z;
-    this.panY = screen.y - p.y * z;
+    this.setRotationValue(rotationDeg);
+    this.panX = screen.x - (p.x * this.cos - p.y * this.sin) * z;
+    this.panY = screen.y - (p.x * this.sin + p.y * this.cos) * z;
     this.emit('view');
     this.requestFrame();
+  }
+
+  /** View rotation in degrees (clockwise). Only the view turns — the course does not. */
+  rotation = 0;
+  private cos = 1;
+  private sin = 0;
+  private setRotationValue(deg: number): void {
+    let d = ((deg % 360) + 360) % 360;
+    if (d > 180) d -= 360;
+    if (Math.abs(d) < 1e-9) d = 0;
+    this.rotation = d;
+    const r = (d * Math.PI) / 180;
+    this.cos = Math.cos(r);
+    this.sin = Math.sin(r);
+    if (Math.abs(this.cos) < 1e-12) this.cos = 0;
+    if (Math.abs(this.sin) < 1e-12) this.sin = 0;
+  }
+
+  /** Rotate the view about the middle of the window. */
+  rotateView(deg: number, at?: Vec2): void {
+    this.viewAt(at ?? { x: this.cssW / 2, y: this.cssH / 2 }, this.zoom, deg);
+  }
+
+  /** Turn the view so the selected hole plays straight up the screen. */
+  pointHoleUp(): void {
+    const h = this.selectedHole();
+    if (!h || h.points.length < 2) return this.setMessage('Select a hole first (Hole tool or the Scorecard).');
+    const a = h.points[0];
+    const b = h.points[h.points.length - 1];
+    const ang = (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
+    const mid = this.worldToScreen({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    this.viewAt(mid, this.zoom, -90 - ang);
+    this.centerOn({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
   }
 
   zoomStep(dir: 1 | -1, at?: Vec2): void {
@@ -630,10 +747,16 @@ export class Editor {
 
   fit(): void {
     if (!this.doc || !this.cssW) return;
-    const z = Math.min((this.cssW - 40) / this.doc.width, (this.cssH - 40) / this.doc.height);
+    const W = this.doc.width;
+    const H = this.doc.height;
+    const ex = Math.abs(W * this.cos) + Math.abs(H * this.sin);
+    const ey = Math.abs(W * this.sin) + Math.abs(H * this.cos);
+    const z = Math.min((this.cssW - 40) / ex, (this.cssH - 40) / ey);
     this.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
-    this.panX = Math.round((this.cssW - this.doc.width * this.zoom) / 2);
-    this.panY = Math.round((this.cssH - this.doc.height * this.zoom) / 2);
+    const cx = W / 2;
+    const cy = H / 2;
+    this.panX = Math.round(this.cssW / 2 - (cx * this.cos - cy * this.sin) * this.zoom);
+    this.panY = Math.round(this.cssH / 2 - (cx * this.sin + cy * this.cos) * this.zoom);
     this.emit('view');
     this.requestFrame();
   }
@@ -681,31 +804,52 @@ export class Editor {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = '#808080';
     ctx.fillRect(0, 0, this.cssW, this.cssH);
-    const W = this.doc.width * this.zoom;
-    const H = this.doc.height * this.zoom;
-    const x = Math.round(this.panX * this.dpr) / this.dpr;
-    const y = Math.round(this.panY * this.dpr) / this.dpr;
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    ctx.fillRect(x + 3, y + 3, W, H);
-    ctx.fillStyle = rgbCss(surfaceColor(this.doc.background));
-    ctx.fillRect(x, y, W, H);
-
-    const toScreen = (w: Vec2) => this.worldToScreen(w);
-    const upy = this.zoom / this.doc.yardsPerPixel;
+    const W = this.doc.width;
+    const H = this.doc.height;
+    const ypp = this.doc.yardsPerPixel;
     const images = this.doc.layers.filter((l): l is ImageLayer => l.kind === 'image' && l.visible);
+    const geo = this.doc.geo;
+    const maps = geo ? this.doc.layers.filter((l): l is MapLayer => l.kind === 'map' && l.visible) : [];
+
+    // Everything that belongs to the course is drawn in doc‑pixel space under the view
+    // transform (pan · rotate · zoom), so map, underlays and paint turn together.
     ctx.save();
+    this.applyView(ctx);
+    const inPx = (w: Vec2) => ({ x: w.x / ypp, y: w.y / ypp });
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(3 / this.zoom, 3 / this.zoom, W, H);
+    ctx.fillStyle = rgbCss(surfaceColor(this.doc.background));
+    ctx.fillRect(0, 0, W, H);
     ctx.beginPath();
-    ctx.rect(x, y, W, H);
+    ctx.rect(0, 0, W, H);
     ctx.clip();
-    for (const l of images) if (!l.above) drawUnderlay(ctx, l, toScreen, upy, () => this.requestFrame());
+    for (const l of this.doc.layers) {
+      if (!l.visible) continue;
+      if (l.kind === 'map' && geo) {
+        drawMap(ctx, {
+          geo,
+          source: l.source,
+          opacity: l.opacity,
+          toScreen: inPx,
+          unitsPerYard: 1 / ypp,
+          view: this.visibleWorld(),
+          dpr: this.dpr * this.zoom,
+          seam: 0.6 / this.zoom,
+          onLoad: () => this.requestFrame(),
+        });
+      } else if (l.kind === 'image' && !l.above) drawUnderlay(ctx, l, inPx, 1 / ypp, () => this.requestFrame());
+    }
     ctx.imageSmoothingEnabled = this.zoom < 1;
     ctx.imageSmoothingQuality = 'medium';
-    ctx.drawImage(this.docCanvas, x, y, W, H);
-    for (const l of images) if (l.above) drawUnderlay(ctx, l, toScreen, upy, () => this.requestFrame());
-    ctx.restore();
-
+    ctx.drawImage(this.docCanvas, 0, 0, W, H);
+    for (const l of images) if (l.above) drawUnderlay(ctx, l, inPx, 1 / ypp, () => this.requestFrame());
     if (this.pixelGridZoom && this.zoom >= this.pixelGridZoom) this.drawGrid(1, 'rgba(0,0,0,0.12)');
-    if (this.showYardGrid) this.drawGrid(this.yardGridSize / this.doc.yardsPerPixel, 'rgba(0,0,0,0.35)', true);
+    if (this.showYardGrid) this.drawGrid(this.yardGridSize / ypp, 'rgba(0,0,0,0.35)');
+    ctx.restore();
+    if (this.showYardGrid) this.drawGridLabels(this.yardGridSize / ypp);
+
+    const toScreen = (w: Vec2) => this.worldToScreen(w);
+    const upy = this.zoom / ypp;
 
     if (this.showHoles)
       drawHoles(ctx, this.doc.holes, {
@@ -725,6 +869,8 @@ export class Editor {
     this.drawRegion(ctx);
     this.drawRuler(ctx);
     this.tool.overlay?.(ctx);
+    this.drawDocHandles(ctx);
+    if (maps.length) drawAttribution(ctx, [...new Set(maps.map((m) => MAP_SOURCES[m.source].attribution))].join(' · '), this.cssW, this.cssH);
   }
 
   setYardGrid(size: 0 | 25 | 50 | 100): void {
@@ -774,38 +920,63 @@ export class Editor {
     }
   }
 
-  private drawGrid(stepPx: number, color: string, labels = false): void {
+  /** Pan · rotate · zoom (· device pixel ratio): doc pixels → canvas. */
+  private applyView(ctx: CanvasRenderingContext2D): void {
+    const d = this.dpr;
+    const z = this.zoom;
+    // Snap the origin to device pixels when unrotated so pixel art stays crisp.
+    const e = this.rotation === 0 ? Math.round(this.panX * d) : this.panX * d;
+    const f = this.rotation === 0 ? Math.round(this.panY * d) : this.panY * d;
+    ctx.setTransform(d * z * this.cos, d * z * this.sin, -d * z * this.sin, d * z * this.cos, e, f);
+  }
+
+  /** Visible doc‑pixel bounds (clipped to the doc). */
+  private visiblePx(): { x0: number; y0: number; x1: number; y1: number } {
+    const pts = [
+      { x: 0, y: 0 },
+      { x: this.cssW, y: 0 },
+      { x: this.cssW, y: this.cssH },
+      { x: 0, y: this.cssH },
+    ].map((s) => this.screenToPx(s));
+    return {
+      x0: Math.max(0, Math.min(...pts.map((p) => p.x))),
+      y0: Math.max(0, Math.min(...pts.map((p) => p.y))),
+      x1: Math.min(this.doc.width, Math.max(...pts.map((p) => p.x))),
+      y1: Math.min(this.doc.height, Math.max(...pts.map((p) => p.y))),
+    };
+  }
+
+  /** Grid lines in doc‑pixel space (call with the view transform applied). */
+  private drawGrid(stepPx: number, color: string): void {
     const ctx = this.ctx;
-    const tl = this.screenToPx({ x: 0, y: 0 });
-    const br = this.screenToPx({ x: this.cssW, y: this.cssH });
-    const x0 = Math.max(0, Math.floor(tl.x / stepPx) * stepPx);
-    const y0 = Math.max(0, Math.floor(tl.y / stepPx) * stepPx);
-    const x1 = Math.min(this.doc.width, br.x);
-    const y1 = Math.min(this.doc.height, br.y);
+    const v = this.visiblePx();
     ctx.save();
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1 / this.zoom;
     ctx.beginPath();
-    for (let gx = x0; gx <= x1; gx += stepPx) {
-      const s = this.pxToScreen({ x: gx, y: 0 });
-      const sx = Math.round(s.x) + 0.5;
-      ctx.moveTo(sx, Math.max(0, this.panY));
-      ctx.lineTo(sx, Math.min(this.cssH, this.panY + this.doc.height * this.zoom));
+    for (let gx = Math.ceil(v.x0 / stepPx) * stepPx; gx <= v.x1; gx += stepPx) {
+      ctx.moveTo(gx, v.y0);
+      ctx.lineTo(gx, v.y1);
     }
-    for (let gy = y0; gy <= y1; gy += stepPx) {
-      const s = this.pxToScreen({ x: 0, y: gy });
-      const sy = Math.round(s.y) + 0.5;
-      ctx.moveTo(Math.max(0, this.panX), sy);
-      ctx.lineTo(Math.min(this.cssW, this.panX + this.doc.width * this.zoom), sy);
+    for (let gy = Math.ceil(v.y0 / stepPx) * stepPx; gy <= v.y1; gy += stepPx) {
+      ctx.moveTo(v.x0, gy);
+      ctx.lineTo(v.x1, gy);
     }
     ctx.stroke();
-    if (labels && stepPx * this.zoom > 40) {
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.font = '10px system-ui, sans-serif';
-      for (let gx = x0; gx <= x1; gx += stepPx) {
-        const s = this.pxToScreen({ x: gx, y: 0 });
-        ctx.fillText(`${Math.round(gx * this.doc.yardsPerPixel)}`, s.x + 2, Math.max(10, this.panY + 10));
-      }
+    ctx.restore();
+  }
+
+  /** Yard labels along the course's top edge (screen space, so text stays upright). */
+  private drawGridLabels(stepPx: number): void {
+    if (stepPx * this.zoom <= 40) return;
+    const ctx = this.ctx;
+    const v = this.visiblePx();
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.font = '10px system-ui, sans-serif';
+    for (let gx = Math.ceil(v.x0 / stepPx) * stepPx; gx <= v.x1; gx += stepPx) {
+      const s = this.pxToScreen({ x: gx, y: v.y0 });
+      ctx.fillText(`${Math.round(gx * this.doc.yardsPerPixel)}`, s.x + 2, s.y + 10);
     }
     ctx.restore();
   }
@@ -946,6 +1117,13 @@ export class Editor {
         this.updateCursor();
         return;
       }
+      if (e.button === 0) {
+        const hh = this.hitDocHandle({ x: e.clientX - c.getBoundingClientRect().left, y: e.clientY - c.getBoundingClientRect().top });
+        if (hh) {
+          this.resizeDrag = { handle: hh, rect: { x: 0, y: 0, w: this.doc.width, h: this.doc.height } };
+          return;
+        }
+      }
       let button = e.button;
       if (button === 0 && e.ctrlKey && this.tool.secondaryButton) button = 2; // ⌃‑click on a Mac
       if (button !== 0 && !(button === 2 && this.tool.secondaryButton)) return;
@@ -968,7 +1146,22 @@ export class Editor {
       }
       const info = this.info(e);
       this.hover = info;
+      if (this.resizeDrag) {
+        this.dragResize(info.px);
+        this.requestFrame();
+        return;
+      }
       this.tool.move?.(info, this.pointerDown);
+      if (!this.pointerDown) {
+        const hh = this.hitDocHandle(info.screen);
+        if (hh) {
+          this.canvas.style.cursor = HANDLE_CURSORS[hh];
+          this.handleHover = true;
+        } else if (this.handleHover) {
+          this.handleHover = false;
+          this.updateCursor();
+        }
+      }
       this.emit('status');
       this.requestFrame();
     });
@@ -977,6 +1170,13 @@ export class Editor {
       if (this.panning) {
         this.panning = null;
         this.updateCursor();
+        return;
+      }
+      if (this.resizeDrag) {
+        const r = this.resizeDrag.rect;
+        this.resizeDrag = null;
+        if (r.x !== 0 || r.y !== 0 || r.w !== this.doc.width || r.h !== this.doc.height) this.resizeCourse(r);
+        this.requestFrame();
         return;
       }
       if (!this.pointerDown) return;
@@ -1016,15 +1216,18 @@ export class Editor {
 
     // Safari trackpad pinch
     let gestureZoom = 1;
+    let gestureRot = 0;
     c.addEventListener('gesturestart', (e) => {
       e.preventDefault();
       gestureZoom = this.zoom;
+      gestureRot = this.rotation;
     });
     c.addEventListener('gesturechange', (e) => {
       e.preventDefault();
-      const ge = e as unknown as { scale: number; clientX: number; clientY: number };
+      const ge = e as unknown as { scale: number; rotation: number; clientX: number; clientY: number };
       const r = c.getBoundingClientRect();
-      this.zoomAt({ x: ge.clientX - r.left, y: ge.clientY - r.top }, gestureZoom * ge.scale);
+      // Trackpad pinch zooms; two‑finger twist rotates (Safari).
+      this.viewAt({ x: ge.clientX - r.left, y: ge.clientY - r.top }, gestureZoom * ge.scale, gestureRot + (ge.rotation || 0));
     });
 
     window.addEventListener('keydown', (e) => {
@@ -1044,6 +1247,133 @@ export class Editor {
     });
 
     new ResizeObserver(() => this.resize()).observe(c.parentElement!);
+  }
+
+  // ---------------------------------------------------------------- course area resize
+  private resizeDrag: { handle: DocHandle; rect: Rect } | null = null;
+  private handleHover = false;
+
+  /** Change the course area. `rect` is in current doc pixels (x/y may be negative). */
+  resizeCourse(rect: Rect): boolean {
+    this.tool.cancel?.();
+    this.history.begin('Resize course area');
+    this.history.snapshotDoc();
+    try {
+      resizeDoc(this.doc, rect, MAX_DOC_PIXELS);
+    } catch (err) {
+      this.history.abort();
+      this.setMessage((err as Error).message);
+      return false;
+    }
+    this.history.commit();
+    // Keep the content where it was on screen.
+    this.panX += Math.round(rect.x) * this.zoom;
+    this.panY += Math.round(rect.y) * this.zoom;
+    this.region = null;
+    this.clearRuler();
+    this.syncCanvasSize();
+    const k = this.doc.yardsPerPixel;
+    this.setMessage(`Course area is now ${Math.round(this.doc.width * k)} × ${Math.round(this.doc.height * k)} yd.`);
+    this.emit('doc', 'view', 'selection', 'holes');
+    return true;
+  }
+
+  /** Make the course area exactly the part of the course visible in the window. */
+  fitAreaToView(): boolean {
+    const v = this.visibleWorld();
+    const k = this.doc.yardsPerPixel;
+    return this.resizeCourse({ x: v.x / k, y: v.y / k, w: v.w / k, h: v.h / k });
+  }
+
+  /** After undo/redo of a resize the offscreen canvas must match the doc. */
+  private syncCanvasSize(): void {
+    if (this.docCanvas.width === this.doc.width && this.docCanvas.height === this.doc.height) return;
+    this.docCanvas.width = this.doc.width;
+    this.docCanvas.height = this.doc.height;
+    this.dirty = null;
+    this.invalidate();
+  }
+
+  private docHandles(): [DocHandle, Vec2][] {
+    const W = this.doc.width;
+    const H = this.doc.height;
+    const o = 5 / this.zoom; // 5 screen px outside the edge
+    const at = (x: number, y: number) => this.pxToScreen({ x, y });
+    return [
+      ['nw', at(-o, -o)],
+      ['n', at(W / 2, -o)],
+      ['ne', at(W + o, -o)],
+      ['e', at(W + o, H / 2)],
+      ['se', at(W + o, H + o)],
+      ['s', at(W / 2, H + o)],
+      ['sw', at(-o, H + o)],
+      ['w', at(-o, H / 2)],
+    ];
+  }
+
+  private hitDocHandle(s: Vec2): DocHandle | null {
+    if (this.spaceHeld || this.tool.id === 'hand') return null;
+    for (const [hnd, p] of this.docHandles()) if (Math.abs(p.x - s.x) <= 6 && Math.abs(p.y - s.y) <= 6) return hnd;
+    return null;
+  }
+
+  private dragResize(p: Vec2): void {
+    const d = this.resizeDrag!;
+    const W = this.doc.width;
+    const H = this.doc.height;
+    const r = { x: 0, y: 0, w: W, h: H };
+    const px = Math.round(p.x);
+    const py = Math.round(p.y);
+    if (d.handle.includes('w')) {
+      r.x = Math.min(px, W - MIN_SIDE_PX);
+      r.w = W - r.x;
+    }
+    if (d.handle.includes('e')) r.w = Math.max(MIN_SIDE_PX, px);
+    if (d.handle.includes('n')) {
+      r.y = Math.min(py, H - MIN_SIDE_PX);
+      r.h = H - r.y;
+    }
+    if (d.handle.includes('s')) r.h = Math.max(MIN_SIDE_PX, py);
+    d.rect = r;
+  }
+
+  private drawDocHandles(ctx: CanvasRenderingContext2D): void {
+    ctx.save();
+    for (const [, p] of this.docHandles()) {
+      ctx.fillStyle = '#000080';
+      ctx.fillRect(Math.round(p.x - 3), Math.round(p.y - 3), 6, 6);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(Math.round(p.x - 3) - 0.5, Math.round(p.y - 3) - 0.5, 7, 7);
+    }
+    const d = this.resizeDrag;
+    if (d) {
+      const r = d.rect;
+      const c = [
+        { x: r.x, y: r.y },
+        { x: r.x + r.w, y: r.y },
+        { x: r.x + r.w, y: r.y + r.h },
+        { x: r.x, y: r.y + r.h },
+      ].map((p) => this.pxToScreen(p));
+      ctx.beginPath();
+      c.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const k = this.doc.yardsPerPixel;
+      const text = `${Math.round(r.w * k)} × ${Math.round(r.h * k)} yd`;
+      ctx.font = 'bold 11px system-ui, sans-serif';
+      const tw = ctx.measureText(text).width + 8;
+      const at = c[2];
+      ctx.fillStyle = '#000';
+      ctx.fillRect(Math.round(at.x - tw), Math.round(at.y + 8), tw, 16);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(text, Math.round(at.x - tw + 4), Math.round(at.y + 20));
+    }
+    ctx.restore();
   }
 
   private resize(): void {

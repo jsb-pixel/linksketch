@@ -1,4 +1,5 @@
 import type { ColorMap } from './surfaces';
+import type { GeoRef } from '../geo/geo';
 
 /** A point. Units depend on context: "world" points are yards, "px" points are doc pixels. */
 export interface Vec2 {
@@ -67,7 +68,18 @@ export interface ImageLayer extends LayerBase, ImagePlacement {
   imgH: number;
 }
 
-export type Layer = RasterLayer | VectorLayer | ImageLayer;
+export type MapSource = 'usgs' | 'esri';
+
+/** Live satellite imagery under the course (needs doc.geo). Never exported. */
+export interface MapLayer extends LayerBase {
+  kind: 'map';
+  source: MapSource;
+  opacity: number;
+}
+
+export type Layer = RasterLayer | VectorLayer | ImageLayer | MapLayer;
+/** Reference layers are only for tracing: not part of the pixel drawing or exports. */
+export type ReferenceLayer = ImageLayer | MapLayer;
 export type DrawingLayer = RasterLayer | VectorLayer;
 
 /** A golf hole: its line of play from tee through aim points to the green. */
@@ -90,6 +102,8 @@ export interface CourseDoc {
   background: string;
   /** Course color overrides (themes, custom colors). */
   colors: ColorMap;
+  /** Where the course sits on Earth (absent for fictional courses). */
+  geo?: GeoRef;
   /** Bottom → top. */
   layers: Layer[];
   holes: Hole[];
