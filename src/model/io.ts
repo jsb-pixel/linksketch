@@ -7,6 +7,7 @@ import type { CourseDoc, Layer } from './types';
 import { decodeTerrain, encodeTerrain, type Terrain } from '../terrain/terrain';
 
 export const FILE_EXT = '.fairway';
+// Internal IDs keep the original working name so existing saves and autosaves still open.
 const FORMAT = 'fairway-paint';
 const VERSION = 1;
 
@@ -93,8 +94,8 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000;
 export function deserialize(text: string): CourseDoc {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const j: any = JSON.parse(text);
-  if (j?.format !== FORMAT) throw new Error('This is not a Fairway Paint course file.');
-  if (j.version > VERSION) throw new Error('This file was made with a newer version of Fairway Paint.');
+  if (j?.format !== FORMAT) throw new Error('This is not a Linksketch course file.');
+  if (j.version > VERSION) throw new Error('This file was made with a newer version of Linksketch.');
   const W = j.width | 0;
   const H = j.height | 0;
   if (W <= 0 || H <= 0) throw new Error('Invalid course size.');
@@ -216,7 +217,7 @@ function parseColors(c: unknown): ColorMap {
 const clamp = (n: number) => Math.max(0, Math.min(255, Math.round(n)));
 
 // ---------- autosave (IndexedDB) ----------
-const DB = 'fairway-paint';
+const DB = 'fairway-paint'; // see FORMAT note above
 const STORE = 'kv';
 
 function openDb(): Promise<IDBDatabase> {

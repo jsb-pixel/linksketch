@@ -41,7 +41,7 @@ type PickerWindow = Window & {
   showOpenFilePicker?: (o: unknown) => Promise<FileHandle[]>;
 };
 const win = window as PickerWindow;
-const PICKER_TYPES = [{ description: 'Fairway Paint course', accept: { 'application/json': [FILE_EXT] } }];
+const PICKER_TYPES = [{ description: 'Linksketch course', accept: { 'application/json': [FILE_EXT] } }];
 
 export class App {
   readonly ed: Editor;
@@ -77,7 +77,7 @@ export class App {
 
   // ------------------------------------------------------------ files
   private updateTitle(): void {
-    document.title = `${this.unsaved ? '• ' : ''}${this.ed.doc.name} — Fairway Paint`;
+    document.title = `${this.unsaved ? '• ' : ''}${this.ed.doc.name} — Linksketch`;
   }
 
   private scheduleAutosave(): void {
@@ -727,7 +727,7 @@ export class App {
         title: 'Help',
         items: [
           { label: 'Keyboard shortcuts', action: () => this.shortcutsDialog() },
-          { label: 'About Fairway Paint', action: () => this.aboutDialog() },
+          { label: 'About Linksketch', action: () => this.aboutDialog() },
         ],
       },
     ];
@@ -816,11 +816,11 @@ export class App {
 
   private aboutDialog(): void {
     dialog(
-      'About Fairway Paint',
+      'About Linksketch',
       h(
         'div',
         { class: 'about' },
-        h('p', { textContent: 'Fairway Paint v0.1 — a pixel‑art golf course design tool.' }),
+        h('p', { textContent: 'Linksketch v0.4 — a pixel‑art golf course design tool.' }),
         h('p', { textContent: 'Every pixel has a real size, so shapes, areas and measurements are in yards.' }),
         h('p', { textContent: 'Your work autosaves in this browser. Use File → Save to keep a .fairway file.' }),
       ),

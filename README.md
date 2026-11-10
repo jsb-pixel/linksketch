@@ -1,4 +1,4 @@
-# Fairway Paint
+# Linksketch
 
 A Paint-style pixel-art golf course designer. See [docs/DESIGN.md](docs/DESIGN.md) for the plan.
 

@@ -1,6 +1,8 @@
-# Fairway Paint — Design Doc
+# Linksketch — Design Doc
 
-_Working name. Living document — update it when a decision changes._
+_Renamed from the working name “Fairway Paint” on 2026‑11‑09. Internal IDs (file format
+`fairway-paint`, `.fairway` extension, autosave DB) intentionally keep the old name so
+existing saves keep working. Living document — update it when a decision changes._
 
 ## 1. Product in one sentence
 
