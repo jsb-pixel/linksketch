@@ -1,5 +1,6 @@
 import type { ColorMap } from './surfaces';
 import type { GeoRef } from '../geo/geo';
+import type { Terrain } from '../terrain/terrain';
 
 /** A point. Units depend on context: "world" points are yards, "px" points are doc pixels. */
 export interface Vec2 {
@@ -77,7 +78,17 @@ export interface MapLayer extends LayerBase {
   opacity: number;
 }
 
-export type Layer = RasterLayer | VectorLayer | ImageLayer | MapLayer;
+/** How terrain (doc.terrain) is shown. Drawn over the drawing. */
+export interface TerrainLayer extends LayerBase {
+  kind: 'terrain';
+  showShade: boolean;
+  showContours: boolean;
+  /** Contour interval in feet. */
+  interval: number;
+  opacity: number;
+}
+
+export type Layer = RasterLayer | VectorLayer | ImageLayer | MapLayer | TerrainLayer;
 /** Reference layers are only for tracing: not part of the pixel drawing or exports. */
 export type ReferenceLayer = ImageLayer | MapLayer;
 export type DrawingLayer = RasterLayer | VectorLayer;
@@ -104,6 +115,8 @@ export interface CourseDoc {
   colors: ColorMap;
   /** Where the course sits on Earth (absent for fictional courses). */
   geo?: GeoRef;
+  /** Elevation model (real or sculpted). */
+  terrain?: Terrain;
   /** Bottom → top. */
   layers: Layer[];
   holes: Hole[];

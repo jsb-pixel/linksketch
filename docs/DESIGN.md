@@ -161,7 +161,15 @@ Active surface is shown like Paint's fg/bg swatch.
   Fit course area to view — keeps paint/shapes/holes/underlays/geo aligned, one undo step).
   View rotation (R/⇧R, angle box, Safari trackpad twist, “Point hole up”): only the *view*
   turns — the course grid, yardages and exports stay north‑up.
-- **v0.4 Terrain** — USGS 3DEP elevation → contour + hillshade layers; per‑hole
+- **v0.4 Terrain** ✅ built 2026‑11‑09: `doc.terrain` heightfield in feet (grid ≈ ≤200k points,
+  e.g. every 4 yd on an 18‑hole doc; saved as Int16 steps of 0.05 ft). Import real elevation
+  from USGS 3DEP ImageServer (public domain, raw float32 meters via exportImage bsq, US only).
+  Terrain layer draws a multiply hillshade + marching‑squares contours (0.5–20 ft, major every
+  5th) over the drawing, cached per change; included in PNG export; credited on screen.
+  Shape tool D (raise/lower/smooth/flatten, ⌥ inverts, cosine falloff). Elevation in the
+  status bar, ruler climb, hole tee→green climb and “plays like” (+1 yd per 3 ft).
+  Terrain follows course‑area resizes (resampled) and every edit is undoable.
+  Original v0.4 plan: — USGS 3DEP elevation → contour + hillshade layers; per‑hole
   elevation change; paintable fictional terrain (raise/lower brush).
 - **v0.5 Strategy mode** — shot‑pattern ellipses (by handicap + club) placed on
   targets; % of pattern in hazards. Model is pluggable so a full club/dispersion

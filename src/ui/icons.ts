@@ -36,6 +36,9 @@ export const TOOL_ICONS: Record<ToolId, string> = {
   scale: svg(
     '<rect x="1" y="9" width="14" height="5" fill="#ff9be0" stroke="#000"/><path d="M4 9v2M7 9v3M10 9v2M13 9v3" stroke="#000"/><path d="M2 5h12M2 5l2-2M2 5l2 2M14 5l-2-2M14 5l-2 2" stroke="#000"/>',
   ),
+  terrain: svg(
+    '<path d="M1 13 5 6 8 10 11 4 15 13z" fill="#a0784a" stroke="#000"/><path d="M3 11c2-1 4-1 6 0s4 1 5 0M5 8.5c1-.5 2-.5 3 0" stroke="#5c3412" fill="none" stroke-width=".8"/>',
+  ),
   eraser: svg('<path d="M2 11l6-6 6 6-3 3H5z" fill="#ffb6c1" stroke="#000"/><path d="M5 8l6 6" stroke="#000"/>'),
   picker: svg(
     '<path d="M3 13l7-7 1 1-7 7H3z" fill="#fff" stroke="#000"/><rect x="10" y="2" width="4" height="4" fill="#000" transform="rotate(45 12 4)"/>',

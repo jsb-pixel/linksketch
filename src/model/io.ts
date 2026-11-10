@@ -4,6 +4,7 @@
  */
 import { SURFACES, surfaceCode, type ColorMap, type RGB } from './surfaces';
 import type { CourseDoc, Layer } from './types';
+import { decodeTerrain, encodeTerrain, type Terrain } from '../terrain/terrain';
 
 export const FILE_EXT = '.fairway';
 const FORMAT = 'fairway-paint';
@@ -60,10 +61,15 @@ export function serialize(doc: CourseDoc): string {
     background: doc.background,
     colors: doc.colors,
     geo: doc.geo,
+    terrain: doc.terrain ? terrainToJson(doc.terrain) : undefined,
     surfaceTable: SURFACES.map((s) => s.id),
     layers: doc.layers.map((l) => {
       const base = { id: l.id, name: l.name, visible: l.visible, locked: l.locked, kind: l.kind };
       if (l.kind === 'map') return { ...base, source: l.source, opacity: l.opacity };
+      if (l.kind === 'terrain') {
+        const { showShade, showContours, interval, opacity } = l;
+        return { ...base, showShade, showContours, interval, opacity };
+      }
       if (l.kind === 'image') {
         const { src, imgW, imgH, x, y, scale, rotation, opacity, above } = l;
         return { ...base, src, imgW, imgH, x, y, scale, rotation, opacity, above };
@@ -99,6 +105,16 @@ export function deserialize(text: string): CourseDoc {
 
   const layers: Layer[] = (j.layers ?? []).map((l: any): Layer => {
     const base = { id: String(l.id), name: String(l.name), visible: !!l.visible, locked: !!l.locked };
+    if (l.kind === 'terrain') {
+      return {
+        ...base,
+        kind: 'terrain',
+        showShade: l.showShade !== false,
+        showContours: l.showContours !== false,
+        interval: [0.5, 1, 2, 5, 10, 20].includes(+l.interval) ? +l.interval : 2,
+        opacity: Math.max(0, Math.min(1, Number.isFinite(+l.opacity) ? +l.opacity : 0.8)),
+      };
+    }
     if (l.kind === 'map') {
       return {
         ...base,
@@ -147,6 +163,7 @@ export function deserialize(text: string): CourseDoc {
     yardsPerPixel: +j.yardsPerPixel || 1,
     background: String(j.background ?? 'white'),
     colors: parseColors(j.colors),
+    terrain: terrainFromJson(j.terrain),
     geo:
       j.geo && Number.isFinite(+j.geo.lat) && Number.isFinite(+j.geo.lon) && Math.abs(+j.geo.lat) < 85
         ? { lat: +j.geo.lat, lon: +j.geo.lon }
@@ -165,6 +182,19 @@ export function deserialize(text: string): CourseDoc {
           .filter((h: { points: unknown[] }) => h.points.length >= 2)
       : [],
   };
+}
+
+function terrainToJson(t: Terrain) {
+  const e = encodeTerrain(t);
+  return { ...e, data: toBase64(new Uint8Array(e.data.buffer)) };
+}
+
+function terrainFromJson(j: any): Terrain | undefined {
+  if (!j || !(j.w > 1) || !(j.h > 1) || !(j.cell > 0)) return undefined;
+  const bytes = fromBase64(String(j.data ?? ''));
+  if (bytes.length !== j.w * j.h * 2) return undefined;
+  const data = new Int16Array(bytes.buffer, bytes.byteOffset, j.w * j.h);
+  return decodeTerrain({ cell: +j.cell, w: +j.w, h: +j.h, source: j.source === 'usgs' ? 'usgs' : 'sculpted', base: +j.base || 0, step: +j.step || 0.05, data });
 }
 
 function parseColors(c: unknown): ColorMap {

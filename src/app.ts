@@ -6,6 +6,8 @@ import { SURFACES, rgbCss, surfaceById, surfaceColor, surfaceColor2, type ColorM
 import { createImageLayer } from './model/doc';
 import { drawHoles } from './editor/holes';
 import { loadImageBlob } from './editor/underlay';
+import { drawTerrain } from './terrain/render';
+import { createTerrain } from './terrain/terrain';
 import { MAP_SOURCES } from './editor/maptiles';
 import { formatLatLon, parseCoords } from './geo/geo';
 import type { MapSource } from './model/types';
@@ -532,10 +534,22 @@ export class App {
     ctx.fillRect(0, 0, c.width, c.height);
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(ed.docCanvas, 0, 0, c.width, c.height);
+    const tl = ed.terrainLayer();
+    if (tl?.visible && ed.doc.terrain) {
+      ctx.save();
+      ctx.scale(scale, scale);
+      drawTerrain(ctx, ed.doc.terrain, tl, ed.doc.yardsPerPixel, 1 / scale);
+      ctx.restore();
+    }
     // Underlays are reference material and are never exported. Holes are, if shown.
     if (ed.showHoles && ed.doc.holes.length) {
       const k = scale / ed.doc.yardsPerPixel;
-      drawHoles(ctx, ed.doc.holes, { toScreen: (w) => ({ x: w.x * k, y: w.y * k }), unitsPerYard: k, uiScale: Math.max(1, scale / 1.5) });
+      drawHoles(ctx, ed.doc.holes, {
+        toScreen: (w) => ({ x: w.x * k, y: w.y * k }),
+        unitsPerYard: k,
+        uiScale: Math.max(1, scale / 1.5),
+        elevation: ed.doc.terrain ? (w) => ed.elevationAt(w) : undefined,
+      });
     }
     c.toBlob((b) => b && download(b, this.fileName().replace(FILE_EXT, scale > 1 ? `@${scale}x.png` : '.png')), 'image/png');
   }
@@ -618,6 +632,54 @@ export class App {
             enabled: () => !!ed.doc.geo,
             action: () => ed.removeFromMap(),
           },
+        ],
+      },
+      {
+        title: 'Terrain',
+        items: [
+          {
+            label: 'Import real elevation (USGS)',
+            enabled: () => !!ed.doc.geo,
+            action: () => {
+              if (ed.doc.terrain && !confirm('Replace the current terrain with real elevation? (You can undo this.)')) return;
+              void ed.importTerrain();
+            },
+          },
+          {
+            label: 'Start flat terrain',
+            action: () => {
+              if (ed.doc.terrain && !confirm('Replace the current terrain with flat ground? (You can undo this.)')) return;
+              ed.setTerrain(createTerrain(ed.doc.width, ed.doc.height, 'sculpted', 0), 'Start terrain');
+              ed.setTool('terrain');
+            },
+          },
+          { label: 'Shape terrain', shortcut: 'D', action: () => ed.setTool('terrain') },
+          {
+            label: 'Select terrain layer',
+            enabled: () => !!ed.terrainLayer(),
+            action: () => ed.setActiveLayer(ed.terrainLayer()!.id),
+          },
+          { separator: true, label: '' },
+          {
+            label: 'Hillshade',
+            enabled: () => !!ed.terrainLayer(),
+            checked: () => !!ed.terrainLayer()?.showShade,
+            action: () => ed.updateTerrainLayer({ showShade: !ed.terrainLayer()!.showShade }),
+          },
+          {
+            label: 'Contour lines',
+            enabled: () => !!ed.terrainLayer(),
+            checked: () => !!ed.terrainLayer()?.showContours,
+            action: () => ed.updateTerrainLayer({ showContours: !ed.terrainLayer()!.showContours }),
+          },
+          ...[1, 2, 5, 10].map((v) => ({
+            label: `    Every ${v} ft`,
+            enabled: () => !!ed.terrainLayer(),
+            checked: () => ed.terrainLayer()?.interval === v,
+            action: () => ed.updateTerrainLayer({ interval: v, showContours: true }),
+          })),
+          { separator: true, label: '' },
+          { label: 'Remove terrain', enabled: () => !!ed.doc.terrain, action: () => ed.setTerrain(undefined, 'Remove terrain') },
         ],
       },
       {

@@ -2,15 +2,18 @@ import { dist, pixelRect, rectUnion } from '../geom/geom';
 import { findLayer } from '../model/doc';
 import { History } from '../model/history';
 import { surfaceByCode, surfaceById } from '../model/surfaces';
-import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, MapLayer, MapSource, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
+import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, MapLayer, MapSource, RasterLayer, Rect, TerrainLayer, Vec2, VectorLayer } from '../model/types';
 import { drawHoles } from './holes';
 import { drawUnderlay, drawUnderlayFrame } from './underlay';
 import { drawAttribution, drawMap, MAP_SOURCES } from './maptiles';
+import { drawTerrain } from '../terrain/render';
+import { heightAtPx, minMax, type BrushMode, type Terrain } from '../terrain/terrain';
+import { ELEVATION_ATTRIBUTION, fetchUsgsTerrain } from '../terrain/usgs';
 import { geoWithPointAt } from '../geo/geo';
 import { featureContains, flatten, renderRegion, sortedFeatures } from '../render/raster';
 import { forEachPixel, regionEdges, traceOutline, type Region } from '../render/regions';
 import { applyColors, rgbCss, surfaceCode, surfaceColor, type ColorMap, type SurfaceColors } from '../model/surfaces';
-import { createMapLayer, MAX_DOC_PIXELS, uid } from '../model/doc';
+import { createMapLayer, createTerrainLayer, MAX_DOC_PIXELS, uid } from '../model/doc';
 import { MIN_SIDE_PX, resizeDoc } from '../model/resize';
 
 export type ToolId =
@@ -29,7 +32,8 @@ export type ToolId =
   | 'hand'
   | 'hole'
   | 'underlay'
-  | 'scale';
+  | 'scale'
+  | 'terrain';
 
 export interface PointerInfo {
   /** CSS px relative to the canvas. */
@@ -322,6 +326,58 @@ export class Editor {
     Object.assign(l, change);
     this.history.commit();
     this.emit('selection');
+    this.requestFrame();
+  }
+
+  // ---------------------------------------------------------------- terrain
+  terrainBrush: BrushMode = 'raise';
+
+  terrainLayer(): TerrainLayer | null {
+    return (this.doc.layers.find((l) => l.kind === 'terrain') as TerrainLayer) ?? null;
+  }
+
+  /** Ground height in feet at a world point, or null without terrain. */
+  elevationAt(w: Vec2): number | null {
+    const t = this.doc.terrain;
+    return t ? heightAtPx(t, this.worldToPx(w)) : null;
+  }
+
+  /** Install a terrain (replacing any) as one undo step, adding the layer if needed. */
+  setTerrain(t: Terrain | undefined, label: string): void {
+    this.history.begin(label);
+    this.history.snapshotTerrain();
+    this.history.snapshotLayers();
+    this.doc.terrain = t;
+    if (t && !this.terrainLayer()) this.doc.layers = [...this.doc.layers, createTerrainLayer()];
+    if (!t) this.doc.layers = this.doc.layers.filter((l) => l.kind !== 'terrain');
+    this.history.commit();
+    this.emit('doc', 'selection', 'holes');
+    this.requestFrame();
+  }
+
+  /** Download real elevation for a course placed on the map. */
+  async importTerrain(): Promise<void> {
+    if (!this.doc.geo) {
+      this.setMessage('Place the course on the map first (Map → Place course on map…).');
+      return;
+    }
+    this.setMessage('Downloading elevation from USGS 3DEP…');
+    try {
+      const t = await fetchUsgsTerrain(this.doc.geo, this.doc.width, this.doc.height, this.doc.yardsPerPixel);
+      this.setTerrain(t, 'Import elevation');
+      const { min, max } = minMax(t);
+      this.setMessage(`Elevation loaded: ${Math.round(min)}–${Math.round(max)} ft (${Math.round(max - min)} ft of relief).`);
+    } catch (err) {
+      this.setMessage((err as Error).message);
+    }
+  }
+
+  /** Change how terrain is shown (view setting, not an undo step). */
+  updateTerrainLayer(change: Partial<Pick<TerrainLayer, 'showShade' | 'showContours' | 'interval' | 'opacity'>>): void {
+    const l = this.terrainLayer();
+    if (!l) return;
+    Object.assign(l, change);
+    this.emit('selection', 'history');
     this.requestFrame();
   }
 
@@ -843,6 +899,10 @@ export class Editor {
     ctx.imageSmoothingQuality = 'medium';
     ctx.drawImage(this.docCanvas, 0, 0, W, H);
     for (const l of images) if (l.above) drawUnderlay(ctx, l, inPx, 1 / ypp, () => this.requestFrame());
+    const tl = this.terrainLayer();
+    if (tl?.visible && this.doc.terrain) {
+      drawTerrain(ctx, this.doc.terrain, tl, ypp, 1 / this.zoom, this.pointerDown && this.tool.id === 'terrain');
+    }
     if (this.pixelGridZoom && this.zoom >= this.pixelGridZoom) this.drawGrid(1, 'rgba(0,0,0,0.12)');
     if (this.showYardGrid) this.drawGrid(this.yardGridSize / ypp, 'rgba(0,0,0,0.35)');
     ctx.restore();
@@ -859,6 +919,7 @@ export class Editor {
         arcsFromTee: this.arcsFromTee,
         arcsToGreen: this.arcsToGreen,
         handles: this.tool.id === 'hole',
+        elevation: this.doc.terrain ? (w) => this.elevationAt(w) : undefined,
       });
     const img = this.activeImage();
     if (img && (this.tool.id === 'underlay' || this.tool.id === 'scale' || this.activeLayer === img)) {
@@ -870,7 +931,9 @@ export class Editor {
     this.drawRuler(ctx);
     this.tool.overlay?.(ctx);
     this.drawDocHandles(ctx);
-    if (maps.length) drawAttribution(ctx, [...new Set(maps.map((m) => MAP_SOURCES[m.source].attribution))].join(' · '), this.cssW, this.cssH);
+    const credits = maps.map((m) => MAP_SOURCES[m.source].attribution);
+    if (tl?.visible && this.doc.terrain?.source === 'usgs') credits.push(ELEVATION_ATTRIBUTION);
+    if (credits.length) drawAttribution(ctx, [...new Set(credits)].join(' · '), this.cssW, this.cssH);
   }
 
   setYardGrid(size: 0 | 25 | 50 | 100): void {

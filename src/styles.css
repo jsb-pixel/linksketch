@@ -708,3 +708,11 @@ select.num {
   background: transparent;
   text-align: right;
 }
+
+.size.mode {
+  font-size: 11px;
+  color: #000;
+}
+.size.mode.active {
+  color: #fff;
+}

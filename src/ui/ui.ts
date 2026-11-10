@@ -1,5 +1,6 @@
 import { dist, polygonArea, pathLength } from '../geom/geom';
-import { holeYards } from '../editor/holes';
+import { holeYards, playsLike } from '../editor/holes';
+import { minMax, type BrushMode } from '../terrain/terrain';
 import { MAP_SOURCES } from '../editor/maptiles';
 import { formatLatLon, worldToLatLon } from '../geo/geo';
 import type { MapSource } from '../model/types';
@@ -35,6 +36,7 @@ const TOOL_ORDER: ToolId[] = [
   'picker',
   'ruler',
   'hole',
+  'terrain',
   'select',
   'freehand',
   'polygon',
@@ -155,7 +157,25 @@ export function buildToolbox(ed: Editor): void {
         b.addEventListener('click', () => ed.setBrushSize(s));
         grid.append(b);
       }
-      opts.append(grid, h('div', { class: 'opt-note', textContent: `${ed.brushSize}px` }));
+      opts.append(grid, h('div', { class: 'opt-note', textContent: t.id === 'terrain' ? `${ed.brushSize * 4} yd` : `${ed.brushSize}px` }));
+    }
+    if (t.id === 'terrain') {
+      const modes: [BrushMode, string, string][] = [
+        ['raise', '▲', 'Raise'],
+        ['lower', '▼', 'Lower'],
+        ['smooth', '≈', 'Smooth'],
+        ['flatten', '▬', 'Flatten (to the height where you start)'],
+      ];
+      const box = h('div', { class: 'sizes' });
+      for (const [m, icon, title] of modes) {
+        const b = h('button', { class: `size mode${ed.terrainBrush === m ? ' active' : ''}`, title, textContent: icon });
+        b.addEventListener('click', () => {
+          ed.terrainBrush = m;
+          ed.emit('options');
+        });
+        box.append(b);
+      }
+      opts.prepend(box);
     }
     if (t.id === 'freehand') {
       const cb = h('input', { type: 'checkbox', checked: ed.smoothShapes });
@@ -413,8 +433,9 @@ export function buildLayersPanel(ed: Editor): void {
             vector: 'Shape layer (editable shapes)',
             image: 'Underlay image (reference only — not exported)',
             map: 'Satellite map (reference only — not exported)',
+            terrain: 'Terrain — hillshade and contours (drawn over your course)',
           }[l.kind],
-          textContent: { raster: '▦', vector: '◆', image: '🖼', map: '🌎' }[l.kind],
+          textContent: { raster: '▦', vector: '◆', image: '🖼', map: '🌎', terrain: '⛰' }[l.kind],
         });
         const name = h('span', { class: 'name', textContent: l.name });
         const count = l.kind === 'vector' ? h('span', { class: 'count', textContent: `${l.features.length}` }) : '';
@@ -451,6 +472,18 @@ export function buildInfoPanel(ed: Editor): void {
     if (hole) {
       parts.push(h('div', { class: 'info-head', textContent: `Hole ${hole.number}` }));
       parts.push(row('Yardage', `${holeYards(hole)} yd`));
+      if (ed.doc.terrain) {
+        const tee = ed.elevationAt(hole.points[0])!;
+        const green = ed.elevationAt(hole.points[hole.points.length - 1])!;
+        const climb = green - tee;
+        parts.push(row('Tee → green', `${Math.round(tee)} → ${Math.round(green)} ft`));
+        parts.push(
+          row(
+            climb >= 0 ? 'Uphill' : 'Downhill',
+            `${Math.round(Math.abs(climb))} ft · plays ${playsLike(holeYards(hole), climb)} yd`,
+          ),
+        );
+      }
       const num = h('input', { type: 'number', min: '1', max: '36', value: String(hole.number), class: 'num' });
       num.addEventListener('change', () => ed.renumberHole(hole.id, Math.round(+num.value)));
       const par = h('select', { class: 'num' });
@@ -500,6 +533,34 @@ export function buildInfoPanel(ed: Editor): void {
       const move = h('button', { class: 'small', textContent: 'Slide', title: 'Drag the map under the course (U)' });
       move.addEventListener('click', () => ed.setTool('underlay'));
       parts.push(h('div', { class: 'btn-row' }, relocate, move));
+    }
+    if (active?.kind === 'terrain' && ed.doc.terrain) {
+      const l = active;
+      const t = ed.doc.terrain;
+      const { min, max } = minMax(t);
+      parts.push(h('div', { class: 'info-head', textContent: 'Terrain' }));
+      parts.push(row('Source', t.source === 'usgs' ? 'USGS 3DEP (real)' : 'Sculpted'));
+      parts.push(row('Range', `${Math.round(min)}–${Math.round(max)} ft`));
+      parts.push(row('Grid', `every ${Math.round(t.cell * ed.doc.yardsPerPixel)} yd`));
+      const shade = h('input', { type: 'checkbox', checked: l.showShade });
+      shade.addEventListener('change', () => ed.updateTerrainLayer({ showShade: shade.checked }));
+      const cont = h('input', { type: 'checkbox', checked: l.showContours });
+      cont.addEventListener('change', () => ed.updateTerrainLayer({ showContours: cont.checked }));
+      parts.push(h('label', { class: 'opt' }, shade, 'Hillshade'), h('label', { class: 'opt' }, cont, 'Contour lines'));
+      const iv = h('select', { class: 'num' });
+      for (const v of [0.5, 1, 2, 5, 10, 20]) iv.append(h('option', { value: String(v), textContent: `${v} ft`, selected: v === l.interval }));
+      iv.addEventListener('change', () => ed.updateTerrainLayer({ interval: +iv.value }));
+      parts.push(h('div', { class: 'kv' }, h('span', { textContent: 'Contour every' }), iv));
+      const op = h('input', { type: 'range', min: '10', max: '100', value: String(Math.round(l.opacity * 100)) });
+      op.addEventListener('input', () => {
+        l.opacity = +op.value / 100;
+        ed.requestFrame();
+      });
+      op.addEventListener('change', () => ed.updateTerrainLayer({ opacity: +op.value / 100 }));
+      parts.push(h('div', { class: 'kv' }, h('span', { textContent: 'Strength' }), op));
+      const shape = h('button', { class: 'small', textContent: 'Shape (D)' });
+      shape.addEventListener('click', () => ed.setTool('terrain'));
+      parts.push(h('div', { class: 'btn-row' }, shape));
     }
     if (active?.kind === 'image') {
       const l = active;
@@ -569,6 +630,10 @@ export function buildInfoPanel(ed: Editor): void {
       const pts = r.active && r.live ? [...r.points, r.live] : r.points;
       parts.push(h('div', { class: 'info-head', textContent: 'Measurement' }));
       parts.push(row('Total', `${Math.round(pathLength(pts))} yd`));
+      if (ed.doc.terrain && pts.length > 1) {
+        const climb = ed.elevationAt(pts[pts.length - 1])! - ed.elevationAt(pts[0])!;
+        parts.push(row('Elevation change', `${climb >= 0 ? '+' : '−'}${Math.round(Math.abs(climb))} ft`));
+      }
       if (pts.length > 2) parts.push(row('Legs', `${pts.length - 1}`));
       const clr = h('button', { class: 'small', textContent: 'Clear' });
       clr.addEventListener('click', () => ed.clearRuler());
@@ -664,7 +729,9 @@ export function buildStatusBar(ed: Editor): void {
     hint.textContent = ed.message || ed.tool.hint;
     const hv = ed.hover;
     pos.textContent = hv
-      ? `${Math.round(hv.world.x)}, ${Math.round(hv.world.y)} yd${ed.doc.geo ? `  ·  ${formatLatLon(worldToLatLon(ed.doc.geo, hv.world))}` : ''}`
+      ? `${Math.round(hv.world.x)}, ${Math.round(hv.world.y)} yd${ed.doc.terrain ? `  ·  ${Math.round(ed.elevationAt(hv.world)!)} ft` : ''}${
+          ed.doc.geo ? `  ·  ${formatLatLon(worldToLatLon(ed.doc.geo, hv.world))}` : ''
+        }`
       : '';
     layer.textContent = ed.activeLayer ? `${ed.activeLayer.kind === 'raster' ? '▦' : '◆'} ${ed.activeLayer.name}` : '';
     zoom.textContent = `${Math.round(ed.zoom * 100)}%`;

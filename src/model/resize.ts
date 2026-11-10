@@ -6,6 +6,7 @@
  * stays where it was relative to the ground — including the map placement.
  */
 import { worldToLatLon } from '../geo/geo';
+import { resampleTerrain } from '../terrain/terrain';
 import type { CourseDoc, Rect } from './types';
 
 export const MIN_SIDE_PX = 20;
@@ -47,6 +48,7 @@ export function resizeDoc(doc: CourseDoc, rect: Rect, maxPixels: number): void {
     const ll = worldToLatLon(doc.geo, { x: nx * k, y: ny * k });
     doc.geo = { lat: ll.lat, lon: ll.lon };
   }
+  if (doc.terrain) doc.terrain = resampleTerrain(doc.terrain, nx, ny, W, H);
   doc.width = W;
   doc.height = H;
 }

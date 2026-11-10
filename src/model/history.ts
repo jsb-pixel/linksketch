@@ -1,5 +1,6 @@
 import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, MapLayer, RasterLayer, Rect, VectorLayer } from './types';
 import type { GeoRef } from '../geo/geo';
+import { touch, type Terrain } from '../terrain/terrain';
 import { rectUnion } from '../geom/geom';
 import type { ColorMap } from './surfaces';
 
@@ -9,6 +10,7 @@ interface DocState {
   width: number;
   height: number;
   geo: GeoRef | undefined;
+  terrain: Terrain | undefined;
   holes: Hole[];
   layers: Layer[];
   parts: Map<Layer, { pixels?: Uint8Array; features?: Feature[]; x?: number; y?: number }>;
@@ -20,15 +22,37 @@ function captureDoc(doc: CourseDoc): DocState {
     else if (l.kind === 'vector') parts.set(l, { features: l.features });
     else if (l.kind === 'image') parts.set(l, { x: l.x, y: l.y });
   }
-  return { width: doc.width, height: doc.height, geo: doc.geo && { ...doc.geo }, holes: doc.holes, layers: doc.layers.slice(), parts };
+  return { width: doc.width, height: doc.height, geo: doc.geo && { ...doc.geo }, terrain: doc.terrain, holes: doc.holes, layers: doc.layers.slice(), parts };
 }
 function restoreDoc(doc: CourseDoc, s: DocState): void {
   doc.width = s.width;
   doc.height = s.height;
   doc.geo = s.geo && { ...s.geo };
+  doc.terrain = s.terrain;
+  if (s.terrain) touch(s.terrain);
   doc.holes = s.holes;
   doc.layers = s.layers.slice();
   for (const [l, p] of s.parts) Object.assign(l, p);
+}
+
+/** Terrain object + a copy of its heights (the brush edits heights in place). */
+interface TerrainSnap {
+  terrain: Terrain | undefined;
+  heights: Float32Array | undefined;
+}
+const snapTerrain = (t: Terrain | undefined): TerrainSnap => ({ terrain: t, heights: t?.heights.slice() });
+function sameTerrain(a: TerrainSnap, b: TerrainSnap): boolean {
+  if (a.terrain !== b.terrain) return false;
+  if (!a.heights || !b.heights) return a.heights === b.heights;
+  for (let i = 0; i < a.heights.length; i++) if (a.heights[i] !== b.heights[i]) return false;
+  return true;
+}
+function restoreTerrain(doc: CourseDoc, s: TerrainSnap): void {
+  doc.terrain = s.terrain;
+  if (s.terrain && s.heights) {
+    s.terrain.heights.set(s.heights);
+    touch(s.terrain);
+  }
 }
 
 type MapProps = Pick<MapLayer, 'source' | 'opacity'>;
@@ -64,6 +88,7 @@ interface Entry {
   colors?: { before: ColorMap; after: ColorMap };
   holes?: { before: Hole[]; after: Hole[] };
   geo?: { before: GeoRef | undefined; after: GeoRef | undefined };
+  terrain?: { before: TerrainSnap; after: TerrainSnap };
   maps: { layer: MapLayer; before: MapProps; after: MapProps }[];
   docState?: { before: DocState; after: DocState };
   images: { layer: ImageLayer; before: ImagePlacement; after: ImagePlacement }[];
@@ -77,6 +102,7 @@ interface Pending {
   colors?: ColorMap;
   holes?: Hole[];
   geo?: { value: GeoRef | undefined };
+  terrain?: TerrainSnap;
   maps: Map<MapLayer, MapProps>;
   docState?: DocState;
   images: Map<ImageLayer, ImagePlacement>;
@@ -160,6 +186,11 @@ export class History {
     if (!p.docState) p.docState = captureDoc(this.doc);
   }
 
+  snapshotTerrain(): void {
+    const p = this.need();
+    if (!p.terrain) p.terrain = snapTerrain(this.doc.terrain);
+  }
+
   snapshotGeo(): void {
     const p = this.need();
     if (!p.geo) p.geo = { value: this.doc.geo && { ...this.doc.geo } };
@@ -226,11 +257,15 @@ export class History {
     if (p.docState) {
       const after = captureDoc(this.doc);
       const b = p.docState;
-      if (b.width !== after.width || b.height !== after.height || !sameGeo(b.geo, after.geo) || [...after.parts].some(([l, v]) => {
+      if (b.width !== after.width || b.height !== after.height || !sameGeo(b.geo, after.geo) || b.terrain !== after.terrain || [...after.parts].some(([l, v]) => {
         const o = b.parts.get(l);
         return !o || o.pixels !== v.pixels || o.features !== v.features || o.x !== v.x || o.y !== v.y;
       }))
         entry.docState = { before: b, after };
+    }
+    if (p.terrain) {
+      const after = snapTerrain(this.doc.terrain);
+      if (!sameTerrain(p.terrain, after)) entry.terrain = { before: p.terrain, after };
     }
     if (p.geo && !sameGeo(p.geo.value, this.doc.geo)) entry.geo = { before: p.geo.value, after: this.doc.geo && { ...this.doc.geo } };
     for (const [layer, before] of p.maps) {
@@ -241,7 +276,7 @@ export class History {
       const after = placementOf(layer);
       if (!samePlacement(before, after)) entry.images.push({ layer, before, after });
     }
-    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors && !entry.holes && !entry.images.length && !entry.geo && !entry.maps.length && !entry.docState)
+    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors && !entry.holes && !entry.images.length && !entry.geo && !entry.maps.length && !entry.docState && !entry.terrain)
       return false;
     this.undoStack.push(entry);
     if (this.undoStack.length > this.limit) this.undoStack.shift();
@@ -264,6 +299,7 @@ export class History {
     for (const [layer, before] of p.maps) Object.assign(layer, before);
     if (p.geo) this.doc.geo = p.geo.value;
     if (p.docState) restoreDoc(this.doc, p.docState);
+    if (p.terrain) restoreTerrain(this.doc, p.terrain);
   }
 
   undo(): boolean {
@@ -293,6 +329,7 @@ export class History {
 
   private apply(e: Entry, side: 'before' | 'after'): void {
     if (e.docState) restoreDoc(this.doc, e.docState[side]);
+    if (e.terrain) restoreTerrain(this.doc, e.terrain[side]);
     if (e.layers) this.doc.layers = e.layers[side].slice();
     if (e.colors) this.doc.colors = cloneColors(e.colors[side]);
     if (e.holes) this.doc.holes = cloneHoles(e.holes[side]);

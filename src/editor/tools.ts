@@ -4,6 +4,7 @@ import { rgbCss, surfaceCode, surfaceColor } from '../model/surfaces';
 import type { Feature, ImageLayer, RasterLayer, Rect, Vec2, VectorLayer } from '../model/types';
 import { dialog, field } from '../ui/ui';
 import { worldToLatLon, type GeoRef } from '../geo/geo';
+import { createTerrain, dab, heightAtPx, type BrushMode } from '../terrain/terrain';
 import { drawPlayLine } from './holes';
 import { flatten, visibleCodes } from '../render/raster';
 import { floodRegion, forEachPixel } from '../render/regions';
@@ -1224,6 +1225,116 @@ export class ScaleTool implements Tool {
   }
 }
 
+// ---------------------------------------------------------------- terrain
+
+/** Shape the ground: raise, lower, smooth or flatten (mode in tool options; ⌥ inverts). */
+export class TerrainTool implements Tool {
+  id = 'terrain' as const;
+  name = 'Shape terrain';
+  key = 'd';
+  cursor = 'crosshair';
+  usesBrush = true;
+  hint = 'Drag to shape the ground (mode in the tool options) · ⌥ = opposite of raise/lower · [ ] size · hold still to keep working';
+  private at: Vec2 | null = null;
+  private last: Vec2 | null = null;
+  private target = 0;
+  private timer = 0;
+  private alt = false;
+
+  constructor(private ed: Editor) {}
+
+  private radiusPx(): number {
+    return (this.ed.brushSize * 4) / this.ed.doc.yardsPerPixel;
+  }
+
+  private mode(): BrushMode {
+    const m = this.ed.terrainBrush;
+    if (this.alt && m === 'raise') return 'lower';
+    if (this.alt && m === 'lower') return 'raise';
+    return m;
+  }
+
+  private apply(p: Vec2): void {
+    const t = this.ed.doc.terrain;
+    if (!t) return;
+    const m = this.mode();
+    const amount = m === 'raise' || m === 'lower' ? 0.35 : m === 'smooth' ? 0.5 : 0.3;
+    dab(t, p, this.radiusPx(), m, amount, this.target);
+    this.ed.requestFrame();
+  }
+
+  down(e: PointerInfo): void {
+    const ed = this.ed;
+    if (!ed.doc.terrain) {
+      ed.setTerrain(createTerrain(ed.doc.width, ed.doc.height, 'sculpted', 0), 'Start terrain');
+      ed.setMessage('Started a flat terrain at 0 ft. Turn on contours/shading in the Terrain menu to see your shaping.');
+    }
+    const tl = ed.terrainLayer();
+    if (tl && !tl.visible) {
+      tl.visible = true;
+      ed.emit('doc');
+    }
+    this.alt = e.alt;
+    ed.history.begin('Shape terrain');
+    ed.history.snapshotTerrain();
+    this.target = heightAtPx(ed.doc.terrain!, e.px);
+    this.at = e.px;
+    this.last = e.px;
+    this.apply(e.px);
+    this.timer = window.setInterval(() => this.at && this.apply(this.at), 60);
+  }
+
+  move(e: PointerInfo, dragging: boolean): void {
+    if (!dragging || !this.last) return;
+    const step = Math.max(1, this.radiusPx() / 4);
+    const d = dist(this.last, e.px);
+    for (let s = step; s <= d; s += step) {
+      const f = s / d;
+      this.apply({ x: this.last.x + (e.px.x - this.last.x) * f, y: this.last.y + (e.px.y - this.last.y) * f });
+    }
+    if (d >= step) this.last = e.px;
+    this.at = e.px;
+  }
+
+  up(): void {
+    window.clearInterval(this.timer);
+    if (!this.at) return;
+    this.at = null;
+    this.last = null;
+    this.ed.history.commit();
+    this.ed.emit('holes', 'selection');
+    this.ed.requestFrame();
+  }
+
+  cancel(): void {
+    window.clearInterval(this.timer);
+    if (this.at) {
+      this.ed.history.abort();
+      this.ed.requestFrame();
+    }
+    this.at = null;
+    this.last = null;
+  }
+
+  overlay(ctx: CanvasRenderingContext2D): void {
+    const h = this.ed.hover;
+    if (!h) return;
+    const s = this.ed.pxToScreen(h.px);
+    const r = this.radiusPx() * this.ed.zoom;
+    ctx.save();
+    ctx.strokeStyle = '#5c3412';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, r / 2, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 export function registerAllTools(ed: Editor): void {
   for (const T of [
     SelectTool,
@@ -1242,6 +1353,7 @@ export function registerAllTools(ed: Editor): void {
     HoleTool,
     UnderlayTool,
     ScaleTool,
+    TerrainTool,
   ]) {
     ed.registerTool(new T(ed));
   }

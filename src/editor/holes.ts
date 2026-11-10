@@ -18,7 +18,20 @@ export interface HoleDrawOptions {
   handles?: boolean;
   /** Multiplies label/marker sizes (export at 2× / 4×). */
   uiScale?: number;
+  /** Ground height in feet (when the course has terrain). */
+  elevation?: (w: Vec2) => number | null;
 }
+
+/** Elevation change tee → green in feet (positive = uphill), or null. */
+export function holeClimb(h: Hole, elevation?: (w: Vec2) => number | null): number | null {
+  if (!elevation || h.points.length < 2) return null;
+  const a = elevation(h.points[0]);
+  const b = elevation(h.points[h.points.length - 1]);
+  return a === null || b === null ? null : b - a;
+}
+
+/** Rule of thumb: every 3 ft of climb plays about 1 yard longer. */
+export const playsLike = (yards: number, climbFt: number) => Math.round(yards + climbFt / 3);
 
 export function drawHoles(ctx: CanvasRenderingContext2D, holes: Hole[], o: HoleDrawOptions): void {
   const k = o.uiScale ?? 1;
@@ -31,7 +44,7 @@ export function drawHoles(ctx: CanvasRenderingContext2D, holes: Hole[], o: HoleD
     const scr = h.points.map(o.toScreen);
     drawFlag(ctx, scr[scr.length - 1], k);
     drawTee(ctx, scr[0], h.number, k);
-    drawLabel(ctx, h, scr, k, sel);
+    drawLabel(ctx, h, scr, k, sel, holeClimb(h, o.elevation));
     if (sel && o.handles) {
       ctx.save();
       for (const s of scr) {
@@ -115,14 +128,15 @@ function drawFlag(ctx: CanvasRenderingContext2D, s: Vec2, k: number): void {
   ctx.restore();
 }
 
-function drawLabel(ctx: CanvasRenderingContext2D, h: Hole, scr: Vec2[], k: number, sel: boolean): void {
+function drawLabel(ctx: CanvasRenderingContext2D, h: Hole, scr: Vec2[], k: number, sel: boolean, climb: number | null): void {
   // Put the label behind the tee, away from the line of play.
   const a = scr[0];
   const b = scr[1];
   const d = dist(a, b) || 1;
   const ux = (a.x - b.x) / d;
   const uy = (a.y - b.y) / d;
-  const text = `${holeYards(h)} yd · Par ${h.par}`;
+  const climbText = climb !== null && Math.abs(climb) >= 1 ? ` · ${climb > 0 ? '↑' : '↓'}${Math.round(Math.abs(climb))} ft` : '';
+  const text = `${holeYards(h)} yd · Par ${h.par}${climbText}`;
   ctx.save();
   ctx.font = `bold ${11 * k}px system-ui, sans-serif`;
   const w = ctx.measureText(text).width + 10 * k;
