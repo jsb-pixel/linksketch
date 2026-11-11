@@ -1,3 +1,4 @@
+import { parsePlayers } from '../strategy/strategy';
 /**
  * File format (.fairway): JSON. Raster layers are run‑length encoded + base64.
  * The file carries its own surface table so palette reordering never corrupts files.
@@ -63,6 +64,7 @@ export function serialize(doc: CourseDoc): string {
     colors: doc.colors,
     geo: doc.geo,
     terrain: doc.terrain ? terrainToJson(doc.terrain) : undefined,
+    players: doc.players,
     surfaceTable: SURFACES.map((s) => s.id),
     layers: doc.layers.map((l) => {
       const base = { id: l.id, name: l.name, visible: l.visible, locked: l.locked, kind: l.kind };
@@ -85,7 +87,11 @@ export function serialize(doc: CourseDoc): string {
             })),
           };
     }),
-    holes: doc.holes.map((h) => ({ ...h, points: h.points.map((p) => [round3(p.x), round3(p.y)]) })),
+    holes: doc.holes.map((h) => ({
+      ...h,
+      points: h.points.map((p) => [round3(p.x), round3(p.y)]),
+      targets: h.targets?.some(Boolean) ? h.targets.map((p) => (p ? [round3(p.x), round3(p.y)] : null)) : undefined,
+    })),
   });
 }
 
@@ -165,6 +171,7 @@ export function deserialize(text: string): CourseDoc {
     background: String(j.background ?? 'white'),
     colors: parseColors(j.colors),
     terrain: terrainFromJson(j.terrain),
+    players: parsePlayers(j.players),
     geo:
       j.geo && Number.isFinite(+j.geo.lat) && Number.isFinite(+j.geo.lon) && Math.abs(+j.geo.lat) < 85
         ? { lat: +j.geo.lat, lon: +j.geo.lon }
@@ -179,6 +186,13 @@ export function deserialize(text: string): CourseDoc {
             points: (h.points ?? []).map((p: [number, number] | { x: number; y: number }) =>
               Array.isArray(p) ? { x: +p[0], y: +p[1] } : { x: +p.x, y: +p.y },
             ),
+            ...(Array.isArray(h.targets)
+              ? {
+                  targets: h.targets.slice(0, 12).map((p: unknown) =>
+                    Array.isArray(p) && Number.isFinite(+p[0]) && Number.isFinite(+p[1]) ? { x: +p[0], y: +p[1] } : null,
+                  ),
+                }
+              : {}),
           }))
           .filter((h: { points: unknown[] }) => h.points.length >= 2)
       : [],

@@ -1,3 +1,4 @@
+import type { PlayerProfile } from '../strategy/strategy';
 import type { ColorMap } from './surfaces';
 import type { GeoRef } from '../geo/geo';
 import type { Terrain } from '../terrain/terrain';
@@ -100,6 +101,11 @@ export interface Hole {
   par: number;
   /** Tee → aim points → green center, in yards. Immutable: replace, don't mutate. */
   points: Vec2[];
+  /**
+   * Strategy: where each shot is aimed, by shot number, when not at the next point on
+   * the line of play (e.g. the middle of the green rather than the flag). null = default.
+   */
+  targets?: (Vec2 | null)[];
 }
 
 export interface CourseDoc {
@@ -120,4 +126,6 @@ export interface CourseDoc {
   /** Bottom → top. */
   layers: Layer[];
   holes: Hole[];
+  /** Strategy‑mode player profiles (absent = defaults). */
+  players?: PlayerProfile[];
 }

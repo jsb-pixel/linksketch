@@ -17,6 +17,10 @@ import { unionOutline } from '../geom/combine';
 import { applyColors, rgbCss, surfaceCode, surfaceColor, type ColorMap, type SurfaceColors } from '../model/surfaces';
 import { createMapLayer, createTerrainLayer, MAX_DOC_PIXELS, uid } from '../model/doc';
 import { MIN_SIDE_PX, resizeDoc } from '../model/resize';
+import { setDetail } from '../model/detail';
+import { DEFAULT_PLAYERS, landingOdds, planShots, type Odds, type PlayerProfile, type Shot } from '../strategy/strategy';
+import { drawShots } from '../strategy/draw';
+import { visibleCodes } from '../render/raster';
 
 export type ToolId =
   | 'select'
@@ -152,6 +156,12 @@ export class Editor {
   arcsFromTee = true;
   arcsToGreen = true;
   selectedHoleId: string | null = null;
+  /** Strategy mode: landing patterns on the selected hole. */
+  showStrategy = false;
+  /** Player profile id, or 'all'. */
+  strategyPlayer = 'mid';
+  /** Bumped on every drawing change (for strategy caches). */
+  private docRev = 0;
 
   activeLayerId: string | null = null;
   selection: Selection | null = null;
@@ -201,6 +211,7 @@ export class Editor {
     this.doc = doc;
     this.history = new History(doc);
     this.history.onChange = () => {
+      this.syncDetail();
       this.syncCanvasSize();
       if (this.selectedHoleId && !this.doc.holes.some((h) => h.id === this.selectedHoleId)) this.selectedHoleId = null;
       this.requestFrame();
@@ -213,6 +224,7 @@ export class Editor {
     this.syncColors();
     this.docCanvas.width = doc.width;
     this.docCanvas.height = doc.height;
+    this.lastYpp = doc.yardsPerPixel;
     this.selection = null;
     this.others = [];
     this.region = null;
@@ -979,6 +991,7 @@ export class Editor {
     const full = { x: 0, y: 0, w: this.doc.width, h: this.doc.height };
     const pr = r ? pixelRect(r, 0, this.doc.width, this.doc.height) : full;
     if (pr) this.dirty = rectUnion(this.dirty, pr);
+    this.docRev++;
     this.requestFrame();
   }
 
@@ -1062,6 +1075,11 @@ export class Editor {
     const toScreen = (w: Vec2) => this.worldToScreen(w);
     const upy = this.zoom / ypp;
 
+    if (this.showHoles && this.showStrategy) {
+      const hole = this.selectedHole();
+      const placed: { x: number; y: number; w: number; h: number }[] = [];
+      if (hole) for (const r of this.strategyFor(hole)) drawShots(ctx, r.player, r.shots, r.odds, { toScreen, unitsPerYard: upy, placed });
+    }
     if (this.showHoles)
       drawHoles(ctx, this.doc.holes, {
         toScreen,
@@ -1159,13 +1177,122 @@ export class Editor {
     this.requestFrame();
   }
 
+  // ---------------------------------------------------------------- strategy
+  get players(): PlayerProfile[] {
+    return this.doc.players ?? DEFAULT_PLAYERS;
+  }
+
+  setStrategy(change: { show?: boolean; player?: string }): void {
+    if (change.show !== undefined) this.showStrategy = change.show;
+    if (change.player !== undefined) this.strategyPlayer = change.player;
+    if (this.showStrategy && !this.showHoles) this.showHoles = true;
+    this.saveViewPrefs();
+    this.emit('selection', 'holes');
+    this.requestFrame();
+  }
+
+  /** Replace the player profiles (one undo step). Pass null to restore the defaults. */
+  setPlayers(players: PlayerProfile[] | null, label = 'Edit players'): void {
+    this.history.begin(label);
+    this.history.snapshotPlayers();
+    this.doc.players = players ?? undefined;
+    this.history.commit();
+    this.emit('selection', 'holes');
+    this.requestFrame();
+  }
+
+  private shotDrag: { holeId: string; index: number; grab: Vec2; moved: boolean } | null = null;
+  private shotHover = false;
+
+  /** Oval centre under the pointer (strategy shown, Select or Hole tool). */
+  hitShot(screen: Vec2): { holeId: string; index: number; grab: Vec2 } | null {
+    if (!this.showStrategy || !this.showHoles || !['select', 'hole'].includes(this.tool.id)) return null;
+    const hole = this.selectedHole();
+    if (!hole) return null;
+    let best: { holeId: string; index: number; grab: Vec2 } | null = null;
+    let bestD = 9;
+    for (const r of this.strategyFor(hole))
+      for (const s of r.shots) {
+        const d = dist(this.worldToScreen(s.center), screen);
+        if (d <= bestD) {
+          bestD = d;
+          // The target sits at the centre unless the player is out of range.
+          const w = this.pxToWorld(this.screenToPx(screen));
+          best = { holeId: hole.id, index: s.index, grab: { x: s.target.x - w.x, y: s.target.y - w.y } };
+        }
+      }
+    return best;
+  }
+
+  /** Aim one shot of a hole somewhere else (null = back to the line of play). */
+  setShotTarget(holeId: string, index: number, t: Vec2 | null): void {
+    this.updateHole(holeId, t ? 'Move shot target' : 'Reset shot target', (h) => ({ targets: withTarget(h.targets, index, t) }));
+    this.requestFrame();
+  }
+
+  private codes: Uint8Array | null = null;
+  private codesRev = -1;
+  private codesAt = 0;
+  private codesTimer = 0;
+  private oddsCache = new Map<string, Odds>();
+
+  /** Composite surface codes of the whole course, refreshed at most ~3×/s while drawing. */
+  private surfaceCodes(): Uint8Array {
+    const now = performance.now();
+    const stale = this.codesRev !== this.docRev || !this.codes || this.codes.length !== this.doc.width * this.doc.height;
+    if (stale && (!this.codes || this.codes.length !== this.doc.width * this.doc.height || now - this.codesAt > 350)) {
+      this.codes = visibleCodes(this.doc);
+      this.codesRev = this.docRev;
+      this.codesAt = now;
+      this.oddsCache.clear();
+    } else if (stale && !this.codesTimer) {
+      this.codesTimer = window.setTimeout(() => {
+        this.codesTimer = 0;
+        this.requestFrame();
+        this.emit('holes');
+      }, 400);
+    }
+    return this.codes!;
+  }
+
+  /** Surface id at a world point for strategy (null = off the course area). */
+  private strategySurface = (w: Vec2): string | null => {
+    const k = this.doc.yardsPerPixel;
+    const x = Math.floor(w.x / k);
+    const y = Math.floor(w.y / k);
+    if (x < 0 || y < 0 || x >= this.doc.width || y >= this.doc.height) return null;
+    return surfaceByCode(this.surfaceCodes()[y * this.doc.width + x])?.id ?? 'rough';
+  };
+
+  /** Landing patterns + odds for each shown player on a hole. */
+  strategyFor(hole: Hole): { player: PlayerProfile; shots: Shot[]; odds: Odds[] }[] {
+    const list = this.strategyPlayer === 'all' ? this.players : this.players.filter((p) => p.id === this.strategyPlayer);
+    const players = list.length ? list : [this.players[0]];
+    this.surfaceCodes();
+    return players.map((player) => {
+      const shots = planShots(hole, player);
+      const odds = shots.map((s) => {
+        const key = `${s.center.x.toFixed(2)},${s.center.y.toFixed(2)},${s.dir.x.toFixed(4)},${s.dir.y.toFixed(4)},${s.sigmaSide.toFixed(2)},${s.sigmaDepth.toFixed(2)}`;
+        let o = this.oddsCache.get(key);
+        if (!o) {
+          o = landingOdds(s, this.strategySurface);
+          if (this.oddsCache.size > 500) this.oddsCache.clear();
+          this.oddsCache.set(key, o);
+        }
+        return o;
+      });
+      return { player, shots, odds };
+    });
+  }
+
   private loadViewPrefs(): void {
     try {
       const p = JSON.parse(localStorage.getItem('fairway-view') ?? '{}');
       if (typeof p.showYardGrid === 'boolean') this.showYardGrid = p.showYardGrid;
       if ([25, 50, 100].includes(p.yardGridSize)) this.yardGridSize = p.yardGridSize;
       if (typeof p.pixelGridZoom === 'number') this.pixelGridZoom = p.pixelGridZoom;
-      for (const k of ['showHoles', 'arcsFromTee', 'arcsToGreen', 'showPixelTarget'] as const) if (typeof p[k] === 'boolean') this[k] = p[k];
+      for (const k of ['showHoles', 'arcsFromTee', 'arcsToGreen', 'showPixelTarget', 'showStrategy'] as const) if (typeof p[k] === 'boolean') this[k] = p[k];
+      if (typeof p.strategyPlayer === 'string') this.strategyPlayer = p.strategyPlayer;
       if (['offset', 'gap', 'standard'].includes(p.cursorStyle)) this.cursorStyle = p.cursorStyle;
     } catch {
       /* storage unavailable — use defaults */
@@ -1174,10 +1301,10 @@ export class Editor {
 
   private saveViewPrefs(): void {
     try {
-      const { showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget } = this;
+      const { showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget, showStrategy, strategyPlayer } = this;
       localStorage.setItem(
         'fairway-view',
-        JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget }),
+        JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget, showStrategy, strategyPlayer }),
       );
     } catch {
       /* ignore */
@@ -1390,6 +1517,20 @@ export class Editor {
           this.resizeDrag = { handle: hh, rect: { x: 0, y: 0, w: this.doc.width, h: this.doc.height } };
           return;
         }
+        const r = c.getBoundingClientRect();
+        const shot = this.hitShot({ x: e.clientX - r.left, y: e.clientY - r.top });
+        if (shot) {
+          const dbl = performance.now() - this.lastClick.t < 400 && Math.hypot(e.clientX - this.lastClick.x, e.clientY - this.lastClick.y) < 6;
+          this.lastClick = { t: performance.now(), x: e.clientX, y: e.clientY, n: 1 };
+          if (dbl) {
+            this.setShotTarget(shot.holeId, shot.index, null);
+            return;
+          }
+          this.history.begin('Move shot target');
+          this.history.snapshotHoles();
+          this.shotDrag = { ...shot, moved: false };
+          return;
+        }
       }
       let button = e.button;
       if (button === 0 && e.ctrlKey && this.tool.secondaryButton) button = 2; // ⌃‑click on a Mac
@@ -1418,7 +1559,24 @@ export class Editor {
         this.requestFrame();
         return;
       }
+      if (this.shotDrag) {
+        const d = this.shotDrag;
+        // Keep the grab offset so the oval doesn't jump under the pointer.
+        const t = { x: info.world.x + d.grab.x, y: info.world.y + d.grab.y };
+        this.doc.holes = this.doc.holes.map((h) => (h.id === d.holeId ? { ...h, targets: withTarget(h.targets, d.index, t) } : h));
+        d.moved = true;
+        this.emit('holes');
+        this.requestFrame();
+        return;
+      }
       this.tool.move?.(info, this.pointerDown);
+      if (!this.pointerDown && this.hitShot(info.screen)) {
+        this.canvas.style.cursor = 'move';
+        this.shotHover = true;
+      } else if (this.shotHover) {
+        this.shotHover = false;
+        this.updateCursor();
+      }
       if (!this.pointerDown) {
         const hh = this.hitDocHandle(info.screen);
         if (hh) {
@@ -1437,6 +1595,14 @@ export class Editor {
       if (this.panning) {
         this.panning = null;
         this.updateCursor();
+        return;
+      }
+      if (this.shotDrag) {
+        const moved = this.shotDrag.moved;
+        this.shotDrag = null;
+        if (moved) this.history.commit();
+        else this.history.abort();
+        this.requestFrame();
         return;
       }
       if (this.resizeDrag) {
@@ -1541,6 +1707,41 @@ export class Editor {
     this.syncCanvasSize();
     const k = this.doc.yardsPerPixel;
     this.setMessage(`Course area is now ${Math.round(this.doc.width * k)} × ${Math.round(this.doc.height * k)} yd.`);
+    this.emit('doc', 'view', 'selection', 'holes');
+    return true;
+  }
+
+  private lastYpp = 1;
+
+  /** Keep the view steady when the detail level changes (also on undo/redo). */
+  private syncDetail(): void {
+    const ypp = this.doc.yardsPerPixel;
+    if (ypp === this.lastYpp) return;
+    this.zoom *= ypp / this.lastYpp;
+    this.lastYpp = ypp;
+    this.syncCanvasSize();
+    this.invalidate();
+    this.setMessage(`Detail level: 1 pixel = ${ypp === 0.5 ? '½' : ypp} yard${ypp > 1 ? 's' : ''}.`);
+    this.emit('view');
+  }
+
+  /** Change yards per pixel. Paint is resampled; nothing moves. */
+  changeDetail(ypp: number): boolean {
+    if (ypp === this.doc.yardsPerPixel) return true;
+    this.tool.cancel?.();
+    this.history.begin('Change detail level');
+    this.history.snapshotDoc();
+    try {
+      setDetail(this.doc, ypp, MAX_DOC_PIXELS);
+    } catch (err) {
+      this.history.abort();
+      this.setMessage((err as Error).message);
+      return false;
+    }
+    this.history.commit();
+    this.region = null;
+    this.syncDetail();
+    this.setMessage(`Detail level: 1 pixel = ${ypp === 0.5 ? '½' : ypp} yard${ypp > 1 ? 's' : ''}. Course is now ${this.doc.width} × ${this.doc.height} pixels.`);
     this.emit('doc', 'view', 'selection', 'holes');
     return true;
   }
@@ -1661,4 +1862,13 @@ export class Editor {
 export function isTyping(e: Event): boolean {
   const t = e.target as HTMLElement | null;
   return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+}
+
+/** Copy of a hole's target list with one entry changed (trailing defaults trimmed). */
+function withTarget(list: (Vec2 | null)[] | undefined, i: number, t: Vec2 | null): (Vec2 | null)[] | undefined {
+  const out = (list ?? []).slice();
+  while (out.length <= i) out.push(null);
+  out[i] = t;
+  while (out.length && !out[out.length - 1]) out.pop();
+  return out.length ? out : undefined;
 }

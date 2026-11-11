@@ -1,6 +1,8 @@
 import { Editor, isTyping, type ToolId } from './editor/editor';
 import { registerAllTools } from './editor/tools';
 import { createDoc, MAX_DOC_PIXELS } from './model/doc';
+import { DETAIL_LEVELS, detailPixels } from './model/detail';
+import { drawShots } from './strategy/draw';
 import { deserialize, FILE_EXT, idbGet, idbSet, serialize } from './model/io';
 import { SURFACES, rgbCss, surfaceById, surfaceColor, surfaceColor2, type ColorMap } from './model/surfaces';
 import { createImageLayer } from './model/doc';
@@ -293,6 +295,7 @@ export class App {
     });
     window.addEventListener('fairway:import-image', () => void this.importImageDialog());
     window.addEventListener('fairway:move-shapes', () => this.moveShapesDialog());
+    window.addEventListener('fairway:players', () => this.playersDialog());
     window.addEventListener('fairway:place-on-map', () => this.placeOnMapDialog());
   }
 
@@ -553,6 +556,13 @@ export class App {
         elevation: ed.doc.terrain ? (w) => ed.elevationAt(w) : undefined,
       });
     }
+    const hole = ed.selectedHole();
+    if (ed.showHoles && ed.showStrategy && hole) {
+      const k = scale / ed.doc.yardsPerPixel;
+      const placed: { x: number; y: number; w: number; h: number }[] = [];
+      for (const r of ed.strategyFor(hole))
+        drawShots(ctx, r.player, r.shots, r.odds, { toScreen: (w) => ({ x: w.x * k, y: w.y * k }), unitsPerYard: k, uiScale: Math.max(1, scale / 1.5), placed });
+    }
     c.toBlob((b) => b && download(b, this.fileName().replace(FILE_EXT, scale > 1 ? `@${scale}x.png` : '.png')), 'image/png');
   }
 
@@ -578,6 +588,16 @@ export class App {
           { label: 'Course properties…', action: () => this.courseProperties() },
           { label: 'Course size…', action: () => this.courseSizeDialog() },
           { label: 'Fit course area to view', action: () => ed.fitAreaToView() },
+          { separator: true, label: '' },
+          ...DETAIL_LEVELS.map((d) => ({
+            label: `Detail: ${d.label}`,
+            checked: () => ed.doc.yardsPerPixel === d.ypp,
+            enabled: () => {
+              const p = detailPixels(ed.doc, d.ypp);
+              return p.w * p.h <= MAX_DOC_PIXELS;
+            },
+            action: () => void ed.changeDetail(d.ypp),
+          })),
         ],
       },
       {
@@ -688,6 +708,21 @@ export class App {
         ],
       },
       {
+        title: 'Strategy',
+        items: [
+          { label: 'Show landing patterns', shortcut: 'S', checked: () => ed.showStrategy, action: () => this.toggleStrategy() },
+          { separator: true, label: '' },
+          ...ed.players.map((p) => ({
+            label: p.name,
+            checked: () => ed.strategyPlayer === p.id,
+            action: () => ed.setStrategy({ player: p.id, show: true }),
+          })),
+          { label: 'All players', checked: () => ed.strategyPlayer === 'all', action: () => ed.setStrategy({ player: 'all', show: true }) },
+          { separator: true, label: '' },
+          { label: 'Players (distance & accuracy)…', action: () => this.playersDialog() },
+        ],
+      },
+      {
         title: 'View',
         items: [
           { label: 'Show holes', checked: () => ed.showHoles, action: () => ed.setHoleView({ showHoles: !ed.showHoles }) },
@@ -747,6 +782,72 @@ export class App {
         ],
       },
     ];
+  }
+
+  private toggleStrategy(): void {
+    const ed = this.ed;
+    ed.setStrategy({ show: !ed.showStrategy });
+    if (ed.showStrategy && !ed.selectedHole())
+      ed.setMessage(ed.doc.holes.length ? 'Strategy: pick a hole (click its tee or line with the Hole tool, or a scorecard row).' : 'Strategy: draw a hole first with the Hole tool (O).');
+  }
+
+  /** Edit the strategy players: range and spread. */
+  playersDialog(): void {
+    const ed = this.ed;
+    const rows = ed.players.map((p) => ({ ...p }));
+    const table = h('table', { class: 'players-table' });
+    const draw = () => {
+      table.replaceChildren(
+        h(
+          'tr',
+          {},
+          ...[
+            ['Player', ''],
+            ['Longest', 'Driver distance, yd'],
+            ['Driver width', 'Driver pattern width, yd (about 9 in 10 shots)'],
+            ['150‑yd width', 'Pattern width for a 150‑yd approach, yd'],
+            ['Tilt °', 'How far the pattern turns from short‑right to long‑left'],
+            ['Lefty', 'Left‑handed: pattern runs short‑left to long‑right'],
+          ].map(([t, tip]) => h('th', { textContent: t, title: tip })),
+        ),
+        ...rows.map((p) => {
+          const num = (key: 'maxYards' | 'driverWidth' | 'approachWidth' | 'tilt', step: string) => {
+            const i = h('input', { type: 'number', step, value: String(p[key]), class: 'num' }) as HTMLInputElement;
+            i.addEventListener('input', () => {
+              if (Number.isFinite(+i.value) && (key === 'tilt' || +i.value > 0)) p[key] = +i.value;
+            });
+            return h('td', {}, i);
+          };
+          const name = h('input', { value: p.name }) as HTMLInputElement;
+          name.addEventListener('input', () => (p.name = name.value.slice(0, 40) || p.name));
+          const lefty = h('input', { type: 'checkbox', checked: p.lefty }) as HTMLInputElement;
+          lefty.addEventListener('change', () => (p.lefty = lefty.checked));
+          return h('tr', {}, h('td', {}, name), num('maxYards', '5'), num('driverWidth', '5'), num('approachWidth', '2'), num('tilt', '5'), h('td', {}, lefty));
+        }),
+      );
+    };
+    draw();
+    const body = h(
+      'div',
+      {},
+      table,
+      h('p', {
+        class: 'tip',
+        textContent:
+          'Width is the dashed oval: about 9 in 10 shots finish inside it. In‑between distances are blended between the 150‑yd and driver widths. Patterns are turned so misses go short‑right and long‑left (mirrored for lefties).',
+      }),
+    );
+    dialog('Strategy players', body, [
+      {
+        label: 'Reset to defaults',
+        onClick: () => {
+          ed.setPlayers(null, 'Reset players');
+          return true;
+        },
+      },
+      { label: 'Cancel', onClick: () => {} },
+      { label: 'OK', primary: true, onClick: () => ed.setPlayers(rows) },
+    ]);
   }
 
   private selectAllShapes(): void {
@@ -827,6 +928,10 @@ export class App {
         return;
       }
       if (k === 'x') return ed.swapSurfaces();
+      if (k === 's' && !e.altKey) {
+        e.preventDefault();
+        return this.toggleStrategy();
+      }
       if (k === 'r' && !e.altKey) {
         e.preventDefault();
         return ed.rotateView(ed.rotation + (e.shiftKey ? -15 : 15));
@@ -856,7 +961,10 @@ export class App {
       ['X', 'Swap left/right surfaces'],
       ['R / ⇧R', 'Rotate the view 15° (trackpad twist in Safari)'],
       ['⌘Z / ⇧⌘Z', 'Undo / Redo'],
-      ['⌘D', 'Duplicate shape'],
+      ['⌘D', 'Duplicate shape(s)'],
+      ['⇧‑click / drag a box', 'Select several shapes (Select tool)'],
+      ['⌘A / ⌘J', 'Select all shapes / Combine shapes'],
+      ['S', 'Strategy: show landing patterns on the selected hole'],
       ['⌫', 'Delete shape or point'],
       ['Arrows', 'Nudge shape/point (⇧ = 10 px)'],
       ['⌥‑click point', 'Delete point'],

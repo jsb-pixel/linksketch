@@ -3,7 +3,8 @@ import { holeYards, playsLike } from '../editor/holes';
 import { minMax, type BrushMode } from '../terrain/terrain';
 import { MAP_SOURCES } from '../editor/maptiles';
 import { formatLatLon, worldToLatLon } from '../geo/geo';
-import type { MapSource } from '../model/types';
+import type { Hole, MapSource } from '../model/types';
+import { OUTCOMES, troubleShare } from '../strategy/strategy';
 import type { Editor, ToolId } from '../editor/editor';
 import { createRasterLayer, createVectorLayer } from '../model/doc';
 import { SURFACES, customSlotUsed, surfaceById, surfaceCode, surfaceColor, surfacePixel, rgbCss } from '../model/surfaces';
@@ -540,6 +541,7 @@ export function buildInfoPanel(ed: Editor): void {
       const up = h('button', { class: 'small', textContent: 'Point up', title: 'Rotate the view so this hole plays straight up' });
       up.addEventListener('click', () => ed.pointHoleUp());
       parts.push(h('div', { class: 'btn-row' }, up, del));
+      parts.push(...strategySection(ed, hole));
     }
     const active = ed.activeLayer;
     if (active?.kind === 'map') {
@@ -849,3 +851,53 @@ export function field(label: string, input: HTMLElement, note?: string): HTMLEle
 }
 
 export { h, rgbCss };
+
+// =====================================================================
+// Strategy (part of the hole info)
+// =====================================================================
+function strategySection(ed: Editor, hole: Hole): Node[] {
+  const parts: Node[] = [h('div', { class: 'info-head', textContent: 'Strategy' })];
+  const cb = h('input', { type: 'checkbox', checked: ed.showStrategy });
+  cb.addEventListener('change', () => ed.setStrategy({ show: cb.checked }));
+  parts.push(h('label', { class: 'opt' }, cb, 'Show landing patterns (S)'));
+  const sel = h('select', { class: 'player-select' });
+  for (const p of ed.players) sel.append(h('option', { value: p.id, textContent: p.name, selected: p.id === ed.strategyPlayer }));
+  sel.append(h('option', { value: 'all', textContent: 'All players', selected: ed.strategyPlayer === 'all' }));
+  sel.addEventListener('change', () => ed.setStrategy({ player: sel.value, show: true }));
+  const edit = h('button', { class: 'small', textContent: 'Players…', title: 'Distances and accuracy for each player' });
+  edit.addEventListener('click', () => window.dispatchEvent(new Event('fairway:players')));
+  parts.push(h('div', { class: 'kv' }, sel, edit));
+  if (!ed.showStrategy) return parts;
+  const results = ed.strategyFor(hole);
+  for (const r of results) {
+    if (ed.strategyPlayer === 'all') {
+      const name = h('div', { class: 'strat-player', textContent: r.player.name });
+      name.style.color = r.player.color;
+      parts.push(name);
+    }
+    for (const shot of r.shots) {
+      const od = r.odds[shot.index];
+      const title = `Shot ${shot.index + 1}${shot.extra ? ' (extra)' : ''} · ${Math.round(shot.yards)} yd${shot.toGreen && shot.short <= 1 ? ' to green' : ''}`;
+      parts.push(h('div', { class: 'strat-shot' }, h('span', { textContent: title }), h('span', { class: 'strat-trouble', textContent: `${Math.round(troubleShare(od) * 100)}% trouble` })));
+      const bar = h('div', { class: 'strat-bar' });
+      for (const o of od) {
+        const seg = h('span', { title: `${Math.round(o.share * 100)}% ${OUTCOMES[o.outcome].label}` });
+        seg.style.width = `${o.share * 100}%`;
+        seg.style.background = OUTCOMES[o.outcome].color;
+        bar.append(seg);
+      }
+      parts.push(bar);
+      const text = od.filter((o) => o.share >= 0.02).map((o) => `${Math.round(o.share * 100)}% ${OUTCOMES[o.outcome].label}`).join(' · ');
+      parts.push(h('div', { class: 'strat-text', textContent: text }));
+      if (shot.custom && r === results[0]) {
+        const reset = h('button', { class: 'small', textContent: 'Aim at line of play', title: 'Undo the dragged target (or double‑click the oval’s centre)' });
+        reset.addEventListener('click', () => ed.setShotTarget(hole.id, shot.index, null));
+        parts.push(h('div', { class: 'btn-row' }, reset));
+      }
+      if (shot.short > 1)
+        parts.push(h('div', { class: 'strat-text warn', textContent: `Can’t reach: finishes ${Math.round(shot.short)} yd short of the ${shot.toGreen ? 'green' : 'target'}.` }));
+    }
+  }
+  parts.push(h('div', { class: 'tip', textContent: 'Ovals hold about 4 in 10 (solid) and 9 in 10 (dashed) shots. Drag an oval’s centre dot to aim that shot somewhere else, such as the middle of the green (Select or Hole tool). Double‑click the dot to reset.' }));
+  return parts;
+}

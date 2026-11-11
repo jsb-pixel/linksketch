@@ -1,3 +1,4 @@
+import type { PlayerProfile } from '../strategy/strategy';
 import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, MapLayer, RasterLayer, Rect, VectorLayer } from './types';
 import type { GeoRef } from '../geo/geo';
 import { touch, type Terrain } from '../terrain/terrain';
@@ -6,7 +7,10 @@ import type { ColorMap } from './surfaces';
 
 const cloneColors = (c: ColorMap): ColorMap => JSON.parse(JSON.stringify(c));
 /** Everything a course resize touches (arrays are replaced, never mutated, so refs suffice). */
+const clonePlayers = (p: PlayerProfile[] | undefined) => p && p.map((x) => ({ ...x }));
+
 interface DocState {
+  ypp: number;
   width: number;
   height: number;
   geo: GeoRef | undefined;
@@ -22,9 +26,10 @@ function captureDoc(doc: CourseDoc): DocState {
     else if (l.kind === 'vector') parts.set(l, { features: l.features });
     else if (l.kind === 'image') parts.set(l, { x: l.x, y: l.y });
   }
-  return { width: doc.width, height: doc.height, geo: doc.geo && { ...doc.geo }, terrain: doc.terrain, holes: doc.holes, layers: doc.layers.slice(), parts };
+  return { ypp: doc.yardsPerPixel, width: doc.width, height: doc.height, geo: doc.geo && { ...doc.geo }, terrain: doc.terrain, holes: doc.holes, layers: doc.layers.slice(), parts };
 }
 function restoreDoc(doc: CourseDoc, s: DocState): void {
+  doc.yardsPerPixel = s.ypp;
   doc.width = s.width;
   doc.height = s.height;
   doc.geo = s.geo && { ...s.geo };
@@ -86,6 +91,7 @@ interface Entry {
   raster: RasterChange[];
   layers?: { before: Layer[]; after: Layer[] };
   colors?: { before: ColorMap; after: ColorMap };
+  players?: { before: PlayerProfile[] | undefined; after: PlayerProfile[] | undefined };
   holes?: { before: Hole[]; after: Hole[] };
   geo?: { before: GeoRef | undefined; after: GeoRef | undefined };
   terrain?: { before: TerrainSnap; after: TerrainSnap };
@@ -100,6 +106,7 @@ interface Pending {
   raster: Map<RasterLayer, { copy: Uint8Array; dirty: Rect | null }>;
   layers?: Layer[];
   colors?: ColorMap;
+  players?: { value: PlayerProfile[] | undefined };
   holes?: Hole[];
   geo?: { value: GeoRef | undefined };
   terrain?: TerrainSnap;
@@ -186,6 +193,11 @@ export class History {
     if (!p.docState) p.docState = captureDoc(this.doc);
   }
 
+  snapshotPlayers(): void {
+    const p = this.need();
+    if (!p.players) p.players = { value: clonePlayers(this.doc.players) };
+  }
+
   snapshotTerrain(): void {
     const p = this.need();
     if (!p.terrain) p.terrain = snapTerrain(this.doc.terrain);
@@ -257,7 +269,7 @@ export class History {
     if (p.docState) {
       const after = captureDoc(this.doc);
       const b = p.docState;
-      if (b.width !== after.width || b.height !== after.height || !sameGeo(b.geo, after.geo) || b.terrain !== after.terrain || [...after.parts].some(([l, v]) => {
+      if (b.ypp !== after.ypp || b.width !== after.width || b.height !== after.height || !sameGeo(b.geo, after.geo) || b.terrain !== after.terrain || [...after.parts].some(([l, v]) => {
         const o = b.parts.get(l);
         return !o || o.pixels !== v.pixels || o.features !== v.features || o.x !== v.x || o.y !== v.y;
       }))
@@ -276,7 +288,9 @@ export class History {
       const after = placementOf(layer);
       if (!samePlacement(before, after)) entry.images.push({ layer, before, after });
     }
-    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors && !entry.holes && !entry.images.length && !entry.geo && !entry.maps.length && !entry.docState && !entry.terrain)
+    if (p.players && JSON.stringify(p.players.value) !== JSON.stringify(this.doc.players))
+      entry.players = { before: p.players.value, after: clonePlayers(this.doc.players) };
+    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors && !entry.players && !entry.holes && !entry.images.length && !entry.geo && !entry.maps.length && !entry.docState && !entry.terrain)
       return false;
     this.undoStack.push(entry);
     if (this.undoStack.length > this.limit) this.undoStack.shift();
@@ -294,6 +308,7 @@ export class History {
     for (const [layer, { copy }] of p.raster) layer.pixels.set(copy);
     if (p.layers) this.doc.layers = p.layers.slice();
     if (p.colors) this.doc.colors = cloneColors(p.colors);
+    if (p.players) this.doc.players = clonePlayers(p.players.value);
     if (p.holes) this.doc.holes = cloneHoles(p.holes);
     for (const [layer, before] of p.images) Object.assign(layer, before);
     for (const [layer, before] of p.maps) Object.assign(layer, before);
@@ -332,6 +347,7 @@ export class History {
     if (e.terrain) restoreTerrain(this.doc, e.terrain[side]);
     if (e.layers) this.doc.layers = e.layers[side].slice();
     if (e.colors) this.doc.colors = cloneColors(e.colors[side]);
+    if (e.players) this.doc.players = clonePlayers(e.players[side]);
     if (e.holes) this.doc.holes = cloneHoles(e.holes[side]);
     for (const im of e.images) Object.assign(im.layer, im[side]);
     for (const m of e.maps) Object.assign(m.layer, m[side]);

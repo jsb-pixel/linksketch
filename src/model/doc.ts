@@ -73,7 +73,8 @@ export function createDoc(opts: NewDocOptions = {}): CourseDoc {
     layers: [
       createRasterLayer('Base paint', width, height),
       createVectorLayer('Course shapes'),
-      createRasterLayer('Detail paint', width, height),
+      // Fine detail (bunker fingers, tree specks) reads better without auto outlines.
+      { ...createRasterLayer('Detail paint', width, height), outline: false },
     ],
     holes: [],
   };

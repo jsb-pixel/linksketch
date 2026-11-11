@@ -177,11 +177,27 @@ Active surface is shown like Paint's fg/bg swatch.
   Terrain follows course‑area resizes (resampled) and every edit is undoable.
   Original v0.4 plan: — USGS 3DEP elevation → contour + hillshade layers; per‑hole
   elevation change; paintable fictional terrain (raise/lower brush).
-- **v0.5 Strategy mode** — shot‑pattern ellipses (by handicap + club) placed on
-  targets; % of pattern in hazards. Model is pluggable so a full club/dispersion
-  model can replace the simple one later. (Do not use the "DECADE" trademark.)
-- **v0.6+** — iPad + Pencil polish, accounts, cloud saves, share gallery, paid tier,
-  Tauri desktop build.
+- **v0.4.x Detail level** ✅ File → Detail: ½ / 1 / 2 yd per pixel on an existing course
+  (`model/detail.ts`): finer = pixel split, coarser = majority per block; terrain cell
+  rescaled; one undo step, view stays put. New courses: Detail paint has outlines off.
+- **v0.5 Strategy mode** ✅ (`strategy/`). Each leg of a hole's line of play is a planned
+  shot, played from where the previous one finished; extra shots are added when the green
+  is out of range. Players (Scratch / 10 / 20 hcp, editable per course, saved in
+  `doc.players`) have a max distance and pattern *widths in yards* — driver (60 / 75 / 90)
+  and 150‑yd approach (24 / 36 / 48), blended between, proportional below 150. Width = the
+  2σ oval (1σ sideways = width/4; long/short = sideways × 0.6). Patterns are tilted 15°
+  short‑right → long‑left for right‑handers (mirrored for lefties). Any shot can be aimed off the
+  line of play by dragging its oval's centre (Select/Hole tool) — saved per hole in
+  `hole.targets[i]` (e.g. middle of the green while the flag stays tucked); double‑click resets. Ovals at 1σ (≈39%)
+  and 2σ (≈86%). Odds from 800 fixed Halton samples against the composited
+  surface map (refreshed ≤3×/s while drawing) → fairway/green/rough/fescue/sand/water/
+  trees/other/off‑course; "trouble" = fescue+sand+water+trees+off. S toggles; Strategy
+  menu picks player or All; Info panel shows per‑shot bars; included in PNG export.
+  Room for later: wind, slope/roll, club selection, lie penalties, expected strokes.
+  (Do not use the "DECADE" trademark.)
+- **v0.6** — multiple tee sets + hole pages (yardage‑book export).
+- **v0.7** — course stats + presentation export (legend, scale bar, north arrow, labels).
+- **Later** — crisp shapes option, PWA / Tauri desktop, iPad + Pencil, share links.
 
 ## 7. Monetization notes
 Free core editor; paid tier for satellite/terrain overlays, strategy mode, hi‑res
