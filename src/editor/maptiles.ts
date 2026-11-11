@@ -103,8 +103,18 @@ export function drawMap(ctx: CanvasRenderingContext2D, o: MapDrawOptions): void 
     z--;
   }
   const n = 2 ** z;
+  // Tiles overlap by a hair to hide gaps. Drawn straight at partial opacity, those
+  // overlaps would show as lines along every tile edge, so a faded map is drawn at
+  // full strength off‑screen first, then faded once as a whole.
+  const out = ctx;
+  if (o.opacity < 1) {
+    const sc = scratchCanvas(out.canvas.width, out.canvas.height);
+    ctx = sc.getContext('2d')!;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, sc.width, sc.height);
+    ctx.setTransform(out.getTransform());
+  }
   ctx.save();
-  ctx.globalAlpha = o.opacity;
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   for (let ty = Math.max(0, range.y0); ty <= Math.min(n - 1, range.y1); ty++) {
@@ -130,6 +140,23 @@ export function drawMap(ctx: CanvasRenderingContext2D, o: MapDrawOptions): void 
     }
   }
   ctx.restore();
+  if (ctx !== out) {
+    out.save();
+    out.setTransform(1, 0, 0, 1, 0, 0);
+    out.globalAlpha *= o.opacity;
+    out.drawImage(ctx.canvas, 0, 0);
+    out.restore();
+  }
+}
+
+let scratch: HTMLCanvasElement | null = null;
+function scratchCanvas(w: number, h: number): HTMLCanvasElement {
+  scratch ??= document.createElement('canvas');
+  if (scratch.width !== w || scratch.height !== h) {
+    scratch.width = w;
+    scratch.height = h;
+  }
+  return scratch;
 }
 
 function tileRect(o: MapDrawOptions, z: number, tx: number, ty: number) {
