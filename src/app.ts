@@ -292,6 +292,7 @@ export class App {
       else if (file.name.endsWith(FILE_EXT)) void file.text().then((t) => this.loadText(t, file.name));
     });
     window.addEventListener('fairway:import-image', () => void this.importImageDialog());
+    window.addEventListener('fairway:move-shapes', () => this.moveShapesDialog());
     window.addEventListener('fairway:place-on-map', () => this.placeOnMapDialog());
   }
 
@@ -585,6 +586,9 @@ export class App {
           { label: 'Undo', shortcut: '⌘Z', enabled: () => ed.history.canUndo, action: () => ed.undo() },
           { label: 'Redo', shortcut: '⇧⌘Z', enabled: () => ed.history.canRedo, action: () => ed.redo() },
           { separator: true, label: '' },
+          { label: 'Select all shapes', shortcut: '⌘A', action: () => this.selectAllShapes() },
+          { label: 'Combine shapes', shortcut: '⌘J', enabled: () => ed.multiSelected, action: () => ed.combineSelection() },
+          { label: 'Move shapes by…', enabled: () => !!ed.selected(), action: () => this.moveShapesDialog() },
           { label: 'Duplicate shape', shortcut: '⌘D', enabled: () => !!ed.selected(), action: () => ed.duplicateSelection() },
           { label: 'Delete selection', shortcut: '⌫', enabled: () => !!ed.selected() || !!ed.region, action: () => ed.deleteSelection() },
           { label: 'Painted area → shape', enabled: () => !!ed.region, action: () => ed.regionToShape() },
@@ -745,6 +749,45 @@ export class App {
     ];
   }
 
+  private selectAllShapes(): void {
+    const ed = this.ed;
+    const all = ed.allShapes();
+    if (!all.length) return ed.setMessage('There are no editable shapes to select.');
+    ed.setTool('select');
+    ed.selectMany(all);
+    ed.setMessage(`${all.length} shape${all.length > 1 ? 's' : ''} selected`);
+  }
+
+  /** Move the selected shapes an exact distance. */
+  moveShapesDialog(): void {
+    const ed = this.ed;
+    const n = ed.selectedShapes().length;
+    if (!n) return;
+    const east = h('input', { type: 'number', value: '0', step: '1' }) as HTMLInputElement;
+    const north = h('input', { type: 'number', value: '0', step: '1' }) as HTMLInputElement;
+    const body = h(
+      'div',
+      {},
+      field('East (yd)', east, 'Negative moves west'),
+      field('North (yd)', north, 'Negative moves south'),
+      h('p', { class: 'tip', textContent: 'North is the top of the course, whatever way the view is rotated.' }),
+    );
+    dialog(`Move ${n} shape${n > 1 ? 's' : ''}`, body, [
+      { label: 'Cancel', onClick: () => {} },
+      {
+        label: 'Move',
+        primary: true,
+        onClick: () => {
+          const dx = Number(east.value) || 0;
+          const dy = -(Number(north.value) || 0);
+          ed.moveSelected(dx, dy);
+        },
+      },
+    ]);
+    east.focus();
+    east.select();
+  }
+
   private bindKeys(): void {
     const ed = this.ed;
     window.addEventListener('keydown', (e) => {
@@ -758,6 +801,8 @@ export class App {
           s: () => void this.save(e.shiftKey),
           o: () => void this.open(),
           d: () => ed.duplicateSelection(),
+          a: () => this.selectAllShapes(),
+          j: () => ed.combineSelection(),
           '0': () => ed.fit(),
           '1': () => ed.actualSize(),
           '=': () => ed.zoomStep(1),

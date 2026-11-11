@@ -316,7 +316,7 @@ export function buildPalette(ed: Editor): void {
 export function buildLayersPanel(ed: Editor): void {
   const panel = $('#layers-panel');
   const list = h('div', { class: 'layer-list' });
-  const btn = (label: string, title: string, fn: () => void) => {
+  const btn = (label: string, title: string, fn: (e: MouseEvent) => void) => {
     const b = h('button', { class: 'small', textContent: label, title });
     b.addEventListener('click', fn);
     return b;
@@ -347,8 +347,8 @@ export function buildLayersPanel(ed: Editor): void {
     btn('+ Image', 'Import an underlay image to trace (or paste with ⌘V / drag one in)', () =>
       window.dispatchEvent(new Event('fairway:import-image')),
     ),
-    btn('▲', 'Move layer up', () => moveActive(1)),
-    btn('▼', 'Move layer down', () => moveActive(-1)),
+    btn('▲', 'Bring the selected layer up (draws on top of the one above). ⇧‑click: to the very top. Or drag layers in the list.', (e) => moveActive(1, e.shiftKey)),
+    btn('▼', 'Send the selected layer down (draws underneath). ⇧‑click: to the very bottom.', (e) => moveActive(-1, e.shiftKey)),
     btn('✕', 'Delete layer', () => {
       const l = ed.activeLayer;
       if (!l || ed.doc.layers.length <= 1) return;
@@ -369,18 +369,26 @@ export function buildLayersPanel(ed: Editor): void {
     ed.doc.layers = layers;
     ed.activeLayerId = l.id;
   }
-  function moveActive(dir: 1 | -1) {
+  function moveActive(dir: 1 | -1, all = false) {
     const l = ed.activeLayer;
     if (!l) return;
     const i = ed.doc.layers.indexOf(l);
-    const j = i + dir;
-    if (j < 0 || j >= ed.doc.layers.length) return;
+    moveLayer(l.id, all ? (dir > 0 ? ed.doc.layers.length - 1 : 0) : i + dir);
+  }
+  /** Put a layer at index `to` (0 = bottom). */
+  function moveLayer(id: string, to: number) {
+    const i = ed.doc.layers.findIndex((x) => x.id === id);
+    const j = Math.max(0, Math.min(ed.doc.layers.length - 1, to));
+    if (i < 0 || i === j) return;
     structural('Reorder layers', () => {
       const layers = ed.doc.layers.slice();
-      [layers[i], layers[j]] = [layers[j], layers[i]];
+      const [l] = layers.splice(i, 1);
+      layers.splice(j, 0, l);
       ed.doc.layers = layers;
+      ed.activeLayerId = id;
     });
   }
+  let dragId: string | null = null;
 
   panel.append(h('div', { class: 'panel-title', textContent: 'Layers' }), list, actions);
 
@@ -441,6 +449,38 @@ export function buildLayersPanel(ed: Editor): void {
         const count = l.kind === 'vector' ? h('span', { class: 'count', textContent: `${l.features.length}` }) : '';
         const row = h('div', { class: `layer${l.id === ed.activeLayerId ? ' active' : ''}` }, eye, lock, kind, name, count, outline);
         row.addEventListener('click', () => ed.setActiveLayer(l.id));
+        // Drag a row to change the stacking order (top of the list draws on top).
+        row.draggable = true;
+        row.addEventListener('dragstart', (e) => {
+          dragId = l.id;
+          e.dataTransfer?.setData('text/plain', l.name);
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+          row.classList.add('dragging');
+        });
+        row.addEventListener('dragend', () => {
+          dragId = null;
+          list.querySelectorAll('.layer').forEach((r) => r.classList.remove('dragging', 'drop-above', 'drop-below'));
+        });
+        const above = (e: DragEvent) => {
+          const r = row.getBoundingClientRect();
+          return e.clientY < r.top + r.height / 2;
+        };
+        row.addEventListener('dragover', (e) => {
+          if (!dragId || dragId === l.id) return;
+          e.preventDefault();
+          row.classList.toggle('drop-above', above(e));
+          row.classList.toggle('drop-below', !above(e));
+        });
+        row.addEventListener('dragleave', () => row.classList.remove('drop-above', 'drop-below'));
+        row.addEventListener('drop', (e) => {
+          e.preventDefault();
+          const id = dragId;
+          if (!id || id === l.id) return;
+          const from = ed.doc.layers.findIndex((x) => x.id === id);
+          let to = ed.doc.layers.indexOf(l) + (above(e) ? 1 : 0); // list is shown top‑first
+          if (from < to) to--;
+          moveLayer(id, to);
+        });
         row.addEventListener('dblclick', () => {
           const n = prompt('Layer name', l.name);
           if (n && n.trim()) {
@@ -592,7 +632,25 @@ export function buildInfoPanel(ed: Editor): void {
       parts.push(h('div', { class: 'btn-row' }, setScale, move));
     }
     const sel = ed.selected();
-    if (sel) {
+    if (sel && ed.multiSelected) {
+      const shapes = ed.selectedShapes();
+      const ypp = ed.doc.yardsPerPixel;
+      let area = 0;
+      for (const s of shapes) area += polygonArea(flatten(s.feature, ypp).flat.poly) * ypp * ypp;
+      parts.push(h('div', { class: 'info-head', textContent: `${shapes.length} shapes selected` }));
+      parts.push(row('Total area', formatArea(area)));
+      const comb = h('button', { class: 'small', textContent: 'Combine', title: 'Merge into one shape (⌘J). The shapes must touch or overlap.' });
+      comb.addEventListener('click', () => ed.combineSelection());
+      const mv = h('button', { class: 'small', textContent: 'Move by…', title: 'Move an exact number of yards' });
+      mv.addEventListener('click', () => window.dispatchEvent(new Event('fairway:move-shapes')));
+      parts.push(h('div', { class: 'btn-row' }, comb, mv));
+      const dup = h('button', { class: 'small', textContent: 'Duplicate' });
+      dup.addEventListener('click', () => ed.duplicateSelection());
+      const del = h('button', { class: 'small', textContent: 'Delete' });
+      del.addEventListener('click', () => ed.deleteSelection());
+      parts.push(h('div', { class: 'btn-row' }, dup, del));
+      parts.push(h('div', { class: 'tip', textContent: 'Drag any of them to move the group. Arrow keys nudge 1 yd (⇧ 10 yd). ⇧‑click a shape to add or remove it.' }));
+    } else if (sel) {
       const f = sel.feature;
       const ypp = ed.doc.yardsPerPixel;
       const { flat, bbox } = flatten(f, ypp);

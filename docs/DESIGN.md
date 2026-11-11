@@ -163,6 +163,10 @@ Active surface is shown like Paint's fg/bg swatch.
   Fit course area to view — keeps paint/shapes/holes/underlays/geo aligned, one undo step).
   View rotation (R/⇧R, angle box, Safari trackpad twist, “Point hole up”): only the *view*
   turns — the course grid, yardages and exports stay north‑up.
+- **v0.4.x** ✅ Multi‑select shapes (⇧‑click, drag a box = shapes fully inside, ⌘A), group drag /
+  arrow nudge / “Move shapes by…” in yards, group recolor/duplicate/delete. **Combine shapes**
+  (⌘J): union on a 4× sub‑pixel mask → traced outline (`geom/combine.ts`); shapes must touch;
+  result takes the first shape's surface. Layers reorder by drag, ⇧‑click ▲▼ = top/bottom.
 - **v0.4 Terrain** ✅ built 2026‑11‑09: `doc.terrain` heightfield in feet (grid ≈ ≤200k points,
   e.g. every 4 yd on an 18‑hole doc; saved as Int16 steps of 0.05 ft). Import real elevation
   from USGS 3DEP ImageServer (public domain, raw float32 meters via exportImage bsq, US only).

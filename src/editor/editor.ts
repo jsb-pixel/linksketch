@@ -13,6 +13,7 @@ import { ELEVATION_ATTRIBUTION, fetchUsgsTerrain } from '../terrain/usgs';
 import { geoWithPointAt } from '../geo/geo';
 import { featureContains, flatten, renderRegion, sortedFeatures } from '../render/raster';
 import { forEachPixel, regionEdges, traceOutline, type Region } from '../render/regions';
+import { unionOutline } from '../geom/combine';
 import { applyColors, rgbCss, surfaceCode, surfaceColor, type ColorMap, type SurfaceColors } from '../model/surfaces';
 import { createMapLayer, createTerrainLayer, MAX_DOC_PIXELS, uid } from '../model/doc';
 import { MIN_SIDE_PX, resizeDoc } from '../model/resize';
@@ -74,10 +75,19 @@ export interface Tool {
   overlay?(ctx: CanvasRenderingContext2D): void;
 }
 
-export interface Selection {
+export interface FeatureRef {
   layerId: string;
   featureId: string;
+}
+
+/** The primary selected shape (the one whose points can be edited). */
+export interface Selection extends FeatureRef {
   point: number | null;
+}
+
+export interface SelectedShape {
+  layer: VectorLayer;
+  feature: Feature;
 }
 
 /** A selected area of painted pixels (magic wand). */
@@ -145,6 +155,8 @@ export class Editor {
 
   activeLayerId: string | null = null;
   selection: Selection | null = null;
+  /** Further selected shapes besides the primary one (shift‑click / box select). */
+  others: FeatureRef[] = [];
   region: PixelSelection | null = null;
   ruler: Ruler = { points: [], live: null, active: false };
   hover: PointerInfo | null = null;
@@ -202,6 +214,7 @@ export class Editor {
     this.docCanvas.width = doc.width;
     this.docCanvas.height = doc.height;
     this.selection = null;
+    this.others = [];
     this.region = null;
     this.selectedHoleId = null;
     this.ruler = { points: [], live: null, active: false };
@@ -405,7 +418,7 @@ export class Editor {
 
   setActiveLayer(id: string): void {
     this.activeLayerId = id;
-    if (this.selection && this.selection.layerId !== id) this.select(null);
+    if (this.selection && !this.multiSelected && this.selection.layerId !== id) this.select(null);
     this.emit('doc');
   }
 
@@ -439,31 +452,161 @@ export class Editor {
   // ---------------------------------------------------------------- selection
   select(sel: Selection | null): void {
     this.selection = sel;
+    this.others = [];
     if (sel) this.region = null;
     this.emit('selection');
     this.requestFrame();
   }
 
-  selected(): { layer: VectorLayer; feature: Feature } | null {
-    const s = this.selection;
-    if (!s) return null;
-    const layer = findLayer(this.doc, s.layerId);
+  /** Select several shapes at once (the first becomes the primary one). */
+  selectMany(refs: FeatureRef[]): void {
+    const seen = new Set<string>();
+    const list = refs.filter((r) => !seen.has(r.featureId) && seen.add(r.featureId));
+    this.selection = list.length ? { ...list[0], point: null } : null;
+    this.others = list.slice(1).map((r) => ({ layerId: r.layerId, featureId: r.featureId }));
+    if (list.length) this.region = null;
+    this.emit('selection');
+    this.requestFrame();
+  }
+
+  isSelected(featureId: string): boolean {
+    return this.selection?.featureId === featureId || this.others.some((r) => r.featureId === featureId);
+  }
+
+  /** Shift‑click: add a shape to the selection, or take it out. */
+  toggleSelected(ref: FeatureRef): void {
+    const refs = this.selectedRefs();
+    if (refs.some((r) => r.featureId === ref.featureId)) this.selectMany(refs.filter((r) => r.featureId !== ref.featureId));
+    else this.selectMany([...refs, ref]);
+  }
+
+  selectedRefs(): FeatureRef[] {
+    return this.selection ? [this.selection, ...this.others] : [];
+  }
+
+  /** True when more than one shape is selected (point editing is off then). */
+  get multiSelected(): boolean {
+    return !!this.selection && this.others.length > 0;
+  }
+
+  private resolve(r: FeatureRef): SelectedShape | null {
+    const layer = findLayer(this.doc, r.layerId);
     if (!layer || layer.kind !== 'vector') return null;
-    const feature = layer.features.find((f) => f.id === s.featureId);
+    const feature = layer.features.find((f) => f.id === r.featureId);
     return feature ? { layer, feature } : null;
   }
 
+  /** The primary selected shape. */
+  selected(): SelectedShape | null {
+    return this.selection ? this.resolve(this.selection) : null;
+  }
+
+  /** Every selected shape, primary first. */
+  selectedShapes(): SelectedShape[] {
+    return this.selectedRefs()
+      .map((r) => this.resolve(r))
+      .filter((s): s is SelectedShape => !!s);
+  }
+
   private validateSelection(): void {
+    const alive = this.selectedRefs().filter((r) => this.resolve(r));
+    if (alive.length !== this.selectedRefs().length || (this.selection && alive[0] !== this.selection)) {
+      const point = alive[0] === this.selection ? this.selection.point : null;
+      this.selection = alive.length ? { ...alive[0], point } : null;
+      this.others = alive.slice(1);
+    }
     const sel = this.selected();
-    if (this.selection && !sel) this.selection = null;
-    else if (sel && this.selection!.point !== null && this.selection!.point >= sel.feature.points.length) {
+    if (sel && this.selection!.point !== null && this.selection!.point >= sel.feature.points.length) {
       this.selection!.point = null;
     }
   }
 
+  /** Every editable shape whose whole outline is inside a screen rectangle. */
+  shapesInScreenRect(a: Vec2, b: Vec2): FeatureRef[] {
+    const x0 = Math.min(a.x, b.x);
+    const x1 = Math.max(a.x, b.x);
+    const y0 = Math.min(a.y, b.y);
+    const y1 = Math.max(a.y, b.y);
+    const out: FeatureRef[] = [];
+    for (const layer of this.doc.layers) {
+      if (layer.kind !== 'vector' || !layer.visible || layer.locked) continue;
+      for (const f of layer.features) {
+        const { flat } = flatten(f, this.doc.yardsPerPixel);
+        const inside = flat.poly.every((p) => {
+          const s = this.pxToScreen(p);
+          return s.x >= x0 && s.x <= x1 && s.y >= y0 && s.y <= y1;
+        });
+        if (inside) out.push({ layerId: layer.id, featureId: f.id });
+      }
+    }
+    return out;
+  }
+
+  /** Every editable shape in the course. */
+  allShapes(): FeatureRef[] {
+    const out: FeatureRef[] = [];
+    for (const layer of this.doc.layers) {
+      if (layer.kind !== 'vector' || !layer.visible || layer.locked) continue;
+      for (const f of layer.features) out.push({ layerId: layer.id, featureId: f.id });
+    }
+    return out;
+  }
+
+  /** Move every selected shape by (dx, dy) yards as one undo step. */
+  moveSelected(dx: number, dy: number, label = 'Move shapes'): void {
+    const shapes = this.selectedShapes();
+    if (!shapes.length || (!dx && !dy)) return;
+    this.history.begin(label);
+    for (const s of shapes) this.history.snapshotVector(s.layer);
+    for (const { feature: f } of shapes) {
+      this.invalidateFeature(f);
+      f.points = f.points.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+      this.invalidateFeature(f);
+    }
+    this.history.commit();
+    this.emit('selection');
+  }
+
+  /** Merge the selected shapes into one (they must touch or overlap). */
+  combineSelection(): void {
+    const shapes = this.selectedShapes();
+    if (shapes.length < 2) return this.setMessage('Select two or more shapes to combine (shift‑click or drag a box).');
+    const res = unionOutline(
+      shapes.map((s) => s.feature),
+      this.doc.yardsPerPixel,
+    );
+    if (!res.ok) {
+      return this.setMessage(
+        res.reason === 'apart'
+          ? 'Those shapes don’t all touch. Overlap them a little, then combine.'
+          : 'Couldn’t combine those shapes.',
+      );
+    }
+    const keep = shapes[0];
+    const merged: Feature = { id: uid('F'), surface: keep.feature.surface, smooth: res.smooth, points: res.points };
+    this.history.begin('Combine shapes');
+    for (const s of shapes) this.history.snapshotVector(s.layer);
+    const drop = new Set(shapes.map((s) => s.feature));
+    for (const s of shapes) this.invalidateFeature(s.feature);
+    const idx = keep.layer.features.indexOf(keep.feature);
+    for (const s of shapes) s.layer.features = s.layer.features.filter((f) => !drop.has(f));
+    const list = keep.layer.features.slice();
+    list.splice(Math.min(idx, list.length), 0, merged);
+    keep.layer.features = list;
+    this.history.commit();
+    this.invalidateFeature(merged);
+    this.select({ layerId: keep.layer.id, featureId: merged.id, point: null });
+    const mixed = shapes.some((s) => s.feature.surface !== keep.feature.surface);
+    const name = surfaceById(keep.feature.surface)?.name ?? keep.feature.surface;
+    this.setMessage(`Combined ${shapes.length} shapes into one ${name} shape${mixed ? ' (it takes the first shape’s surface)' : ''}.`);
+  }
+
   setRegion(r: PixelSelection | null): void {
     this.region = r;
-    if (r) this.selection = null;
+    if (r) {
+      this.selection = null;
+      this.others = [];
+    }
     this.emit('selection');
     this.requestFrame();
   }
@@ -607,12 +750,14 @@ export class Editor {
     // With a painted area selected, picking a swatch repaints it.
     if (this.region && this.tool.id === 'wand') this.recolorRegion(id);
     // With the Select tool, picking a swatch recolors the selected shape.
-    const sel = this.selected();
-    if (this.tool.id === 'select' && sel && sel.feature.surface !== id) {
+    const shapes = this.selectedShapes().filter((s) => s.feature.surface !== id);
+    if (this.tool.id === 'select' && shapes.length) {
       this.history.begin('Change surface');
-      this.history.snapshotVector(sel.layer);
-      sel.feature.surface = id;
-      this.invalidateFeature(sel.feature);
+      for (const s of shapes) this.history.snapshotVector(s.layer);
+      for (const s of shapes) {
+        s.feature.surface = id;
+        this.invalidateFeature(s.feature);
+      }
       this.history.commit();
     }
     this.emit('surface', 'selection');
@@ -676,42 +821,47 @@ export class Editor {
 
   deleteSelection(): void {
     if (this.region) return this.eraseRegion();
-    const sel = this.selected();
-    if (!sel) return;
-    this.history.begin('Delete shape');
-    this.history.snapshotVector(sel.layer);
-    this.invalidateFeature(sel.feature);
-    sel.layer.features = sel.layer.features.filter((f) => f !== sel.feature);
+    const shapes = this.selectedShapes();
+    if (!shapes.length) return;
+    this.history.begin(shapes.length > 1 ? 'Delete shapes' : 'Delete shape');
+    for (const s of shapes) this.history.snapshotVector(s.layer);
+    for (const s of shapes) {
+      this.invalidateFeature(s.feature);
+      s.layer.features = s.layer.features.filter((f) => f !== s.feature);
+    }
     this.history.commit();
     this.select(null);
   }
 
   duplicateSelection(): void {
-    const sel = this.selected();
-    if (!sel) return;
+    const shapes = this.selectedShapes();
+    if (!shapes.length) return;
     const off = 10;
-    const copy: Feature = {
-      ...sel.feature,
-      id: `${sel.feature.id}_c${Date.now().toString(36)}`,
-      points: sel.feature.points.map((p) => ({ x: p.x + off, y: p.y + off })),
-    };
-    this.history.begin('Duplicate shape');
-    this.history.snapshotVector(sel.layer);
-    sel.layer.features = [...sel.layer.features, copy];
+    this.history.begin(shapes.length > 1 ? 'Duplicate shapes' : 'Duplicate shape');
+    for (const s of shapes) this.history.snapshotVector(s.layer);
+    const refs: FeatureRef[] = [];
+    for (const s of shapes) {
+      const copy: Feature = { ...s.feature, id: uid('F'), points: s.feature.points.map((p) => ({ x: p.x + off, y: p.y + off })) };
+      s.layer.features = [...s.layer.features, copy];
+      this.invalidateFeature(copy);
+      refs.push({ layerId: s.layer.id, featureId: copy.id });
+    }
     this.history.commit();
-    this.invalidateFeature(copy);
-    this.select({ layerId: sel.layer.id, featureId: copy.id, point: null });
+    this.selectMany(refs);
   }
 
   setSelectedSmooth(smooth: boolean): void {
-    const sel = this.selected();
-    if (!sel || sel.feature.smooth === smooth) return;
+    const shapes = this.selectedShapes().filter((s) => s.feature.smooth !== smooth);
+    if (!shapes.length) return;
     this.history.begin(smooth ? 'Smooth shape' : 'Sharpen shape');
-    this.history.snapshotVector(sel.layer);
-    this.invalidateFeature(sel.feature);
-    sel.feature.smooth = smooth;
-    this.invalidateFeature(sel.feature);
+    for (const s of shapes) this.history.snapshotVector(s.layer);
+    for (const s of shapes) {
+      this.invalidateFeature(s.feature);
+      s.feature.smooth = smooth;
+      this.invalidateFeature(s.feature);
+    }
     this.history.commit();
+    this.emit('selection');
   }
 
   clearRuler(): void {
@@ -1096,17 +1246,20 @@ export class Editor {
   }
 
   private drawSelection(ctx: CanvasRenderingContext2D): void {
-    const sel = this.selected();
-    if (!sel) return;
-    const { flat } = flatten(sel.feature, this.doc.yardsPerPixel);
+    const shapes = this.selectedShapes();
+    if (!shapes.length) return;
+    const sel = shapes[0];
     ctx.save();
     ctx.beginPath();
-    flat.poly.forEach((p, i) => {
-      const s = this.pxToScreen(p);
-      if (i) ctx.lineTo(s.x, s.y);
-      else ctx.moveTo(s.x, s.y);
-    });
-    ctx.closePath();
+    for (const { feature } of shapes) {
+      const { flat } = flatten(feature, this.doc.yardsPerPixel);
+      flat.poly.forEach((p, i) => {
+        const s = this.pxToScreen(p);
+        if (i) ctx.lineTo(s.x, s.y);
+        else ctx.moveTo(s.x, s.y);
+      });
+      ctx.closePath();
+    }
     ctx.lineWidth = 1;
     ctx.strokeStyle = '#fff';
     ctx.stroke();
@@ -1114,7 +1267,7 @@ export class Editor {
     ctx.strokeStyle = '#000';
     ctx.stroke();
     ctx.setLineDash([]);
-    const showHandles = ['select', 'freehand', 'polygon'].includes(this.tool.id);
+    const showHandles = shapes.length === 1 && ['select', 'freehand', 'polygon'].includes(this.tool.id);
     if (showHandles) {
       sel.feature.points.forEach((p, i) => {
         const s = this.worldToScreen(p);

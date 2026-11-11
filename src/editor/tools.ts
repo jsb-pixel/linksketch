@@ -19,7 +19,7 @@ const HANDLE_RADIUS = 7; // screen px
 /** Index of the selected shape's control point under the cursor, or -1. */
 function hitHandle(ed: Editor, screen: Vec2): number {
   const sel = ed.selected();
-  if (!sel) return -1;
+  if (!sel || ed.multiSelected) return -1;
   let best = -1;
   let bestD = HANDLE_RADIUS;
   sel.feature.points.forEach((p, i) => {
@@ -55,13 +55,15 @@ function nearestOnOutline(ed: Editor, f: Feature, screen: Vec2): { span: number;
 
 type DragMode =
   | { kind: 'point'; index: number }
-  | { kind: 'move'; start: Vec2; orig: Vec2[] }
+  | { kind: 'move'; start: Vec2; orig: Map<Feature, Vec2[]> }
   | null;
 
 /** Point/shape dragging, insertion and deletion on the selected shape. */
 class ShapeEditor {
   drag: DragMode = null;
   private moved = false;
+  /** Shape clicked inside a group: a click without dragging narrows to it. */
+  private narrowTo: { layerId: string; featureId: string } | null = null;
 
   constructor(private ed: Editor) {}
 
@@ -84,7 +86,7 @@ class ShapeEditor {
       return true;
     }
     // Double‑click on/near the outline of the selected shape inserts a point.
-    if (sel && e.clicks >= 2) {
+    if (sel && !ed.multiSelected && e.clicks >= 2) {
       const near = nearestOnOutline(ed, sel.feature, e.screen);
       if (near.d <= HANDLE_RADIUS * 1.5) {
         ed.history.begin('Add point');
@@ -102,12 +104,21 @@ class ShapeEditor {
     }
     if (!allowSelectOther) return false;
     const hit = ed.hitFeature(e.world);
+    if (hit && e.shift) {
+      ed.toggleSelected({ layerId: hit.layer.id, featureId: hit.feature.id });
+      return true;
+    }
     if (hit) {
-      if (ed.activeLayerId !== hit.layer.id) ed.setActiveLayer(hit.layer.id);
-      ed.select({ layerId: hit.layer.id, featureId: hit.feature.id, point: null });
-      ed.history.begin('Move shape');
-      ed.history.snapshotVector(hit.layer);
-      this.drag = { kind: 'move', start: e.world, orig: hit.feature.points };
+      // Clicking a shape that is part of a multi‑selection drags the whole group.
+      this.narrowTo = null;
+      if (!ed.isSelected(hit.feature.id) || !ed.multiSelected) {
+        if (ed.activeLayerId !== hit.layer.id) ed.setActiveLayer(hit.layer.id);
+        ed.select({ layerId: hit.layer.id, featureId: hit.feature.id, point: null });
+      } else this.narrowTo = { layerId: hit.layer.id, featureId: hit.feature.id };
+      const shapes = ed.selectedShapes();
+      ed.history.begin(shapes.length > 1 ? 'Move shapes' : 'Move shape');
+      for (const s of shapes) ed.history.snapshotVector(s.layer);
+      this.drag = { kind: 'move', start: e.world, orig: new Map(shapes.map((s) => [s.feature, s.feature.points])) };
       this.moved = false;
       return true;
     }
@@ -117,19 +128,24 @@ class ShapeEditor {
   move(e: PointerInfo): void {
     const sel = this.ed.selected();
     if (!this.drag || !sel) return;
-    const f = sel.feature;
-    this.ed.invalidateFeature(f);
     if (this.drag.kind === 'point') {
+      const f = sel.feature;
+      this.ed.invalidateFeature(f);
       const pts = f.points.slice();
       pts[this.drag.index] = clampWorld(this.ed, e.world);
       f.points = pts;
+      this.ed.invalidateFeature(f);
     } else {
       const dx = e.world.x - this.drag.start.x;
       const dy = e.world.y - this.drag.start.y;
-      f.points = this.drag.orig.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+      for (const [f, orig] of this.drag.orig) {
+        this.ed.invalidateFeature(f);
+        f.points = orig.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+        this.ed.invalidateFeature(f);
+      }
+      this.ed.setMessage(`Moved ${describeOffset(dx, dy)}`);
     }
     this.moved = true;
-    this.ed.invalidateFeature(f);
     this.ed.emit('selection');
   }
 
@@ -138,6 +154,12 @@ class ShapeEditor {
     this.drag = null;
     if (this.moved) this.ed.history.commit();
     else this.ed.history.abort();
+    const n = this.narrowTo;
+    this.narrowTo = null;
+    if (n && !this.moved) {
+      if (this.ed.activeLayerId !== n.layerId) this.ed.setActiveLayer(n.layerId);
+      this.ed.select({ ...n, point: null });
+    }
   }
 
   cancel(): void {
@@ -168,6 +190,10 @@ class ShapeEditor {
     const sel = this.ed.selected();
     if (!sel) return;
     const k = this.ed.doc.yardsPerPixel;
+    if (this.ed.multiSelected || this.ed.selection!.point === null) {
+      this.ed.moveSelected(dx * k, dy * k, 'Nudge');
+      return;
+    }
     this.ed.history.begin('Nudge');
     this.ed.history.snapshotVector(sel.layer);
     this.ed.invalidateFeature(sel.feature);
@@ -203,6 +229,16 @@ class ShapeEditor {
   }
 }
 
+/** "20 yd east, 5 yd north" for a world offset (course north is up). */
+export function describeOffset(dx: number, dy: number): string {
+  const ex = Math.round(dx);
+  const ny = Math.round(-dy);
+  const parts: string[] = [];
+  if (ex) parts.push(`${Math.abs(ex)} yd ${ex > 0 ? 'east' : 'west'}`);
+  if (ny) parts.push(`${Math.abs(ny)} yd ${ny > 0 ? 'north' : 'south'}`);
+  return parts.length ? parts.join(', ') : '0 yd';
+}
+
 function clampWorld(ed: Editor, w: Vec2): Vec2 {
   const k = ed.doc.yardsPerPixel;
   return {
@@ -229,25 +265,64 @@ export class SelectTool implements Tool {
   name = 'Select / Edit points';
   key = 'v';
   cursor = 'default';
-  hint = 'Click a shape to select · drag to move · drag a point to reshape · double‑click outline to add a point · ⌥‑click point or ⌫ to delete';
+  hint = 'Click a shape to select · ⇧‑click or drag a box to select several · drag to move · arrows nudge (⇧ = 10 yd) · drag a point to reshape · double‑click outline to add a point';
   readonly edit: ShapeEditor;
+  /** Box selection in progress (screen px). */
+  private box: { a: Vec2; b: Vec2; add: boolean } | null = null;
 
   constructor(private ed: Editor) {
     this.edit = new ShapeEditor(ed);
   }
 
   down(e: PointerInfo): void {
-    if (!this.edit.down(e, true)) this.ed.select(null);
+    if (this.edit.down(e, true)) return;
+    this.box = { a: e.screen, b: e.screen, add: e.shift };
+    if (!e.shift) this.ed.select(null);
   }
   move(e: PointerInfo, dragging: boolean): void {
+    if (this.box) {
+      if (dragging) this.box.b = e.screen;
+      this.ed.requestFrame();
+      return;
+    }
     if (dragging) this.edit.move(e);
     else this.ed.canvas.style.cursor = hitHandle(this.ed, e.screen) >= 0 ? 'move' : 'default';
   }
   up(): void {
+    const box = this.box;
+    if (box) {
+      this.box = null;
+      if (dist(box.a, box.b) > 3) {
+        const found = this.ed.shapesInScreenRect(box.a, box.b);
+        this.ed.selectMany(box.add ? [...this.ed.selectedRefs(), ...found] : found);
+        const n = this.ed.selectedRefs().length;
+        this.ed.setMessage(n ? `${n} shape${n > 1 ? 's' : ''} selected` : 'No shapes fully inside the box.');
+      }
+      this.ed.requestFrame();
+      return;
+    }
     this.edit.up();
   }
   cancel(): void {
+    this.box = null;
     this.edit.cancel();
+  }
+  overlay(ctx: CanvasRenderingContext2D): void {
+    const b = this.box;
+    if (!b || dist(b.a, b.b) <= 3) return;
+    const x = Math.round(Math.min(b.a.x, b.b.x)) + 0.5;
+    const y = Math.round(Math.min(b.a.y, b.b.y)) + 0.5;
+    const w = Math.round(Math.abs(b.a.x - b.b.x));
+    const h = Math.round(Math.abs(b.a.y - b.b.y));
+    ctx.save();
+    ctx.fillStyle = 'rgba(10,100,255,0.08)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#fff';
+    ctx.strokeRect(x, y, w, h);
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = '#000';
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
   }
   keydown(e: KeyboardEvent): boolean {
     if (e.key === 'Escape' && this.ed.selection) {
