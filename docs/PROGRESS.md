@@ -7,7 +7,10 @@ Hand‑off prompt: `docs/FABLE_PROMPT.md`. Review: `docs/REVIEW.md`.
 
 - [x] **1. Phase 0 review and fixes** — 20 findings fixed with regression tests
       (`tests/review.test.ts`), 7 left with reasons. 74 → 91 unit tests.
-- [ ] 2. Test infrastructure (Playwright + CI), and the move of the editor to `/linksketch/app/`
+- [x] **2. Test infrastructure** — Playwright (`npm run e2e`, production build on port 4317),
+      14 editor tests, GitHub Actions CI, `netlify.toml`. The build is now multi‑page:
+      `site/build/generate.ts` writes pages into `.site/` (git‑ignored) and Vite builds from
+      there; the editor is at `/linksketch/app/` (`site/app.html`).
 - [ ] 3. App features A1–A7
 - [ ] 4. Personal site + Linksketch section
 - [ ] 5. Design polish
@@ -28,6 +31,12 @@ Hand‑off prompt: `docs/FABLE_PROMPT.md`. Review: `docs/REVIEW.md`.
 - **Tee sets:** the first set always tees off from `hole.points[0]`; other sets store
   only their own tee point per hole (`hole.tees[setId]`) and share the rest of the line
   of play.
+
+- **Build layout:** Vite's root is the generated `.site/` folder, so the repo root stays
+  free of generated HTML. Unit tests have their own `vitest.config.ts`.
+- **Old bookmarks of `/`:** the home page lives there now, so it can't redirect. The home
+  page links to the editor and tells returning visitors their saved course is still
+  there (same site → same browser storage; covered by an e2e test).
 
 ## Rules of the road
 

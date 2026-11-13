@@ -43,6 +43,7 @@ run against the old code and confirmed to fail there.
 | R28 | Medium | **With strategy on, the Hole tool could not move aim points or the green.** A shot's oval centre sits exactly on its aim point, and the oval won the click. | `hitShot()` was tested before the tool. | Tools can now claim a handle (`Tool.claims`); the Hole tool's own points win. Targets are still draggable with the Select tool, and with the Hole tool wherever they aren't on a hole point. |
 | R29 | Low | **Strategy player choice could point at a player that isn't in the course**, leaving the picker blank. | `strategyPlayer` is a browser preference; players are per course. | `activeStrategyPlayer` falls back to the first player. |
 | R30 | Low | About box said v0.4. | Hard‑coded string. | `src/version.ts`. |
+| R31 | Low | **A click with one tool could count as the first half of a double‑click with the next.** Found by the end‑to‑end tests: finishing a hole on the green, switching to Select and pressing on the same spot within 0.4 s reset the shot target instead of dragging it. | `lastClick` survived a tool change. | Reset in `setTool()`. Covered by the strategy end‑to‑end test. |
 | R14 | Low | **The last 1.5 s of work could be lost on closing the tab.** | Autosave is debounced and nothing flushed it. | Flushed on `pagehide` and when the tab is hidden. |
 
 ## Checked and found correct

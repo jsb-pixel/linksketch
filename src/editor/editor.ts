@@ -759,6 +759,8 @@ export class Editor {
     this.tool?.cancel?.();
     if (this.tool && this.tool.id !== 'picker') this.previousTool = this.tool.id;
     this.tool = next;
+    // A click with the previous tool must not count towards a double‑click with this one.
+    this.lastClick.t = 0;
     this.updateCursor();
     this.emit('tool', 'status');
     this.requestFrame();

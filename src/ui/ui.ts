@@ -120,17 +120,18 @@ export function buildMenuBar(menus: Menu[]): void {
           row.setAttribute('role', it.checked ? 'menuitemcheckbox' : 'menuitem');
           if (it.checked) row.setAttribute('aria-checked', String(!!checked));
           if (!enabled) row.setAttribute('aria-disabled', 'true');
-          const run = () => {
+          const run = (fromKeyboard = false) => {
             if (!enabled) return;
-            close();
+            // Keyboard users go back to the menu title, so a dialog can return focus there.
+            close(fromKeyboard);
             it.action?.();
           };
-          row.addEventListener('pointerup', run);
+          row.addEventListener('pointerup', () => run());
           row.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               e.stopPropagation();
-              run();
+              run(true);
             }
           });
           return row;
