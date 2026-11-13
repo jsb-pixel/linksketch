@@ -5,9 +5,10 @@ import { writeServiceWorker } from './site/build/sw';
 
 // One static, multi‑page build: the personal site, with the Linksketch editor at
 // /linksketch/app/. Pages are generated into .site/ first (see site/build/generate.ts).
-export default defineConfig(() => {
+export default defineConfig(({ command, isPreview }) => {
   const repo = __dirname;
-  let site = generateSite(repo);
+  const dev = command === 'serve' && !isPreview;
+  let site = generateSite(repo, '.site', dev);
 
   const sitePlugin: Plugin = {
     name: 'linksketch-site',
@@ -21,7 +22,7 @@ export default defineConfig(() => {
       server.watcher.add([resolve(repo, 'content'), resolve(repo, 'site')]);
       server.watcher.on('change', (file) => {
         if (!/[\\/](content|site[\\/]build)[\\/]|site[\\/]app\.html$/.test(file)) return;
-        site = generateSite(repo);
+        site = generateSite(repo, '.site', dev);
         server.ws.send({ type: 'full-reload' });
       });
       server.middlewares.use((req, res, next) => {

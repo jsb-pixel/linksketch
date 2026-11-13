@@ -11,18 +11,28 @@ Hand‑off prompt: `docs/FABLE_PROMPT.md`. Review: `docs/REVIEW.md`.
       14 editor tests, GitHub Actions CI, `netlify.toml`. The build is now multi‑page:
       `site/build/generate.ts` writes pages into `.site/` (git‑ignored) and Vite builds from
       there; the editor is at `/linksketch/app/` (`site/app.html`).
-- [~] **3. App features A1–A7** — all seven are built, unit-tested and e2e-tested:
-      tee sets (`model/tees.ts`), hole pages + PDF (`export/`), course stats (`model/stats.ts`),
-      presentation sheet + Text tool (`model/labels.ts`), crisp shapes (`render/crisp.ts`),
-      PWA (`site/build/sw.ts`, manifest, icons), feedback link + storage reminder.
-      Sample course: `scripts/make-sample.ts` → `public/samples/sample-course.fairway`.
-      **Still to do here:** e2e test for File → Open sample course; on hole pages the
-      "NN wide" label can overlap a strategy label, and the north-arrow "N" needs its
-      position checked when the page is rotated; update docs/DESIGN.md roadmap.
-- [ ] 4. Personal site + Linksketch section
-- [ ] 5. Design polish
-- [ ] 6. Quality bars (Lighthouse, a11y, weight)
-- [ ] 7. Final verification + report
+- [x] **3. App features A1–A7** — tee sets (`model/tees.ts`), hole pages + PDF (`export/`),
+      course stats (`model/stats.ts`), presentation sheet + Text tool (`model/labels.ts`),
+      crisp shapes (`render/crisp.ts`), PWA (`site/build/sw.ts`, manifest, icons), feedback
+      link + storage reminder. Sample course: `npm run sample` → `public/samples/`.
+- [x] **4. Personal site + Linksketch section** — `site/build/generate.ts` builds every page
+      from `content/`. Home, About, Projects, Courses, Writing (+ tags, RSS), Linksketch
+      page, 14-chapter manual, 404, sitemap, robots.
+- [x] **5. Design polish** — two moods in one stylesheet (`site/styles/site.css`); hand-written
+      isometric SVG figures (`site/build/illustrations.ts`); screenshots from the real app
+      (`npm run shots`); self-hosted OFL fonts (`npm`-sourced, `scripts/copy-fonts.mjs`).
+- [x] **6. Quality bars** — Lighthouse (mobile preset, production build), 2026-11-13:
+
+      | Page | Performance | Accessibility | Best practices | SEO |
+      |---|---|---|---|---|
+      | `/` | 100 | 100 | 100 | 100 |
+      | `/linksketch/` | 98 | 100 | 100 | 100 |
+      | `/linksketch/manual/how-the-shot-pattern-is-modeled/` | 99 | 100 | 100 | 100 |
+      | `/writing/` | 99 | 100 | 100 | 100 |
+      | `/linksketch/manual/` | 98 | 100 | 100 | 100 |
+
+      Home page weight is checked by an e2e test (< 1.5 MB with everything loaded).
+- [x] **7. Final verification** — see the last commit message for counts.
 
 ## Decisions (and why)
 
@@ -51,9 +61,16 @@ Hand‑off prompt: `docs/FABLE_PROMPT.md`. Review: `docs/REVIEW.md`.
 - Browser checks use the `test-sandbox` config (port 5174) or the Playwright server
   (port 4317). Never port 5173, never the owner's `fairway-paint` IndexedDB there.
 
-## Where the session of 2026-11-12 stopped (usage limit)
+## For the owner
 
-Milestones 1–2 are committed and complete. Milestone 3 is committed in working order
-(gate green) with the small leftovers listed above. Milestones 4–7 (the personal site,
-design polish, Lighthouse, final report) are **not started**: `/` is still a placeholder
-page from `site/build/generate.ts`. No fonts have been added yet.
+- Everything personal is a `TODO(owner)` placeholder in `content/` (shown highlighted in
+  yellow on the site). Search the folder for `TODO(owner)` to find them all.
+- To add a course to the gallery: export a PNG from Linksketch, put it in
+  `public/courses/`, and add an entry to `content/courses.json`.
+- To write a post: add a Markdown file to `content/writing/` named
+  `YYYY-MM-DD-some-title.md` with the same header lines as the existing ones.
+- The site's address for the RSS feed and sitemap comes from `content/site.json` (`url`),
+  or from the host automatically on Netlify / Cloudflare Pages.
+- Lighthouse was run with Lighthouse 11 through its Node API against `scripts/serve.mjs`,
+  because the Lighthouse command-line tool refuses to start on this Mac's Intel build
+  of Node. Installing an Apple-silicon Node would let `npx lighthouse` run directly.

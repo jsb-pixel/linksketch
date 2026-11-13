@@ -1185,6 +1185,21 @@ mark.todo {
   .manual-side > ol > li {
     break-inside: avoid;
   }
+  /* Finger‑sized links on touch screens. */
+  .manual-side ol ol a {
+    padding: 13px 0;
+  }
+  .tagline a {
+    padding: 12px 12px;
+  }
+  .annot a,
+  .post-meta a {
+    display: inline-block;
+    padding: 12px 4px;
+  }
+  .pager a {
+    padding: 10px 0;
+  }
   .toc-row {
     grid-template-columns: minmax(0, 1fr) auto;
   }

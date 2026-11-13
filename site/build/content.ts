@@ -47,7 +47,7 @@ export const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g,
 /** Words → minutes, at an unhurried 220 words a minute. */
 export function readTime(markdown: string): number {
   const words = markdown.replace(/\{\{[^}]*\}\}|<!--[\s\S]*?-->|[#*_`|>-]/g, ' ').split(/\s+/).filter(Boolean).length;
-  return Math.max(1, Math.round(words / 220));
+  return Math.max(1, Math.ceil(words / 220));
 }
 
 /** URL‑safe slug of a heading or tag. */

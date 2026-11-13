@@ -587,7 +587,11 @@ ${urls.map((u) => `  <url><loc>${c.base}${u}</loc></url>`).join('\n')}
 }
 
 // ---------------------------------------------------------------- main
-export function generateSite(repo: string, outDir = '.site'): SiteOutput {
+/**
+ * `dev` is true for the Vite dev server: scripts and styles outside Vite's root are then
+ * addressed as /@fs/… (the dev server can't follow "../" out of its root, the build can).
+ */
+export function generateSite(repo: string, outDir = '.site', dev = false): SiteOutput {
   const out = resolve(repo, outDir);
   rmSync(out, { recursive: true, force: true });
   const read = (p: string) => readFileSync(join(repo, p), 'utf8');
@@ -669,7 +673,7 @@ export function generateSite(repo: string, outDir = '.site'): SiteOutput {
     const file = join(out, pageFile(p.url));
     mkdirSync(dirname(file), { recursive: true });
     // %SRC% and %SITE% become relative paths back into the repo, so Vite bundles them.
-    const rel = (target: string) => relative(dirname(file), join(repo, target)).split('\\').join('/');
+    const rel = (target: string) => (dev ? `/@fs${join(repo, target).split('\\').join('/')}` : relative(dirname(file), join(repo, target)).split('\\').join('/'));
     writeFileSync(file, p.html.replaceAll('%SRC%', rel('src')).replaceAll('%SITE%', rel('site')));
     inputs[pageFile(p.url).replace(/\.html$/, '').replace(/[/]/g, '_') || 'index'] = file;
   }

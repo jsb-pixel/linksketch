@@ -18,6 +18,17 @@ npm run build      # typecheck + production build into dist/
 npm run gate       # everything above, in order — run before every commit
 ```
 
+```bash
+npm run sample     # rebuild the bundled sample course (public/samples/)
+npm run shots      # re-capture the website's screenshots from the real app
+```
+
+## Editing the website
+
+Words and data live in `content/`: `site.json` (who you are, your projects),
+`courses.json` (the gallery), `pages/` (home intro, About), `writing/` (posts) and
+`manual/` (the Linksketch manual). Anything marked `TODO(owner)` is a placeholder.
+
 ## Code map
 
 | Folder | What lives there |
