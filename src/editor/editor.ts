@@ -20,6 +20,10 @@ import { MIN_SIDE_PX, resizeDoc } from '../model/resize';
 import { setDetail } from '../model/detail';
 import { DEFAULT_PLAYERS, landingOdds, planShots, shotKey, type Odds, type PlayerProfile, type Shot } from '../strategy/strategy';
 import { panAfterOriginShift } from './viewmath';
+import { applyTeeSets, teeOf, teeSets, withTee } from '../model/tees';
+import type { TeeSet, TextLabel } from '../model/types';
+import { drawLabels } from '../model/labels';
+import { CRISP_MIN_ZOOM, drawCrisp } from '../render/crisp';
 import { drawShots } from '../strategy/draw';
 import { visibleCodes } from '../render/raster';
 
@@ -40,7 +44,8 @@ export type ToolId =
   | 'hole'
   | 'underlay'
   | 'scale'
-  | 'terrain';
+  | 'terrain'
+  | 'text';
 
 export interface PointerInfo {
   /** CSS px relative to the canvas. */
@@ -165,6 +170,18 @@ export class Editor {
   strategyPlayer = 'mid';
   /** Bumped on every drawing change (for strategy caches). */
   private docRev = 0;
+  /** Changes whenever the drawing does — for anything that caches what it computed. */
+  get revision(): number {
+    return this.docRev;
+  }
+  /** Draw shapes as smooth curves at screen resolution when zoomed in (view option). */
+  crispShapes = false;
+
+  setCrispShapes(on: boolean): void {
+    this.crispShapes = on;
+    this.saveViewPrefs();
+    this.requestFrame();
+  }
 
   activeLayerId: string | null = null;
   selection: Selection | null = null;
@@ -217,6 +234,7 @@ export class Editor {
       this.syncDetail();
       this.syncCanvasSize();
       if (this.selectedHoleId && !this.doc.holes.some((h) => h.id === this.selectedHoleId)) this.selectedHoleId = null;
+      if (this.selectedLabelId && !this.selectedLabel()) this.selectedLabelId = null;
       this.requestFrame();
       this.syncColors();
       this.validateSelection();
@@ -235,6 +253,7 @@ export class Editor {
     this.others = [];
     this.region = null;
     this.selectedHoleId = null;
+    this.selectedLabelId = null;
     this.ruler = { points: [], live: null, active: false };
     this.activeLayerId = doc.layers.find((l) => l.kind === 'vector')?.id ?? doc.layers[0]?.id ?? null;
     this.invalidate();
@@ -276,6 +295,101 @@ export class Editor {
     this.doc.holes = this.doc.holes.map((x) => (x.id === id ? { ...x, number: n } : x.number === n ? { ...x, number: old } : x));
     this.history.commit();
     this.emit('holes', 'selection');
+  }
+
+  // ---------------------------------------------------------------- text labels
+  showLabels = true;
+  selectedLabelId: string | null = null;
+
+  selectedLabel(): TextLabel | null {
+    return this.doc.labels?.find((l) => l.id === this.selectedLabelId) ?? null;
+  }
+
+  selectLabel(id: string | null): void {
+    this.selectedLabelId = id;
+    this.emit('selection');
+    this.requestFrame();
+  }
+
+  /** Change the list of labels as one undo step. */
+  private editLabels(label: string, fn: (list: TextLabel[]) => TextLabel[]): void {
+    this.history.begin(label);
+    this.history.snapshotLabels();
+    const next = fn(this.doc.labels ?? []);
+    this.doc.labels = next.length ? next : undefined;
+    this.history.commit();
+    this.emit('selection');
+    this.requestFrame();
+  }
+
+  addLabel(at: Vec2, text: string, size: number): void {
+    const l: TextLabel = { id: uid('T'), x: at.x, y: at.y, text: text.slice(0, 120), size };
+    this.editLabels('Add label', (list) => [...list, l]);
+    this.selectLabel(l.id);
+  }
+
+  updateLabel(id: string, change: Partial<Pick<TextLabel, 'text' | 'size' | 'x' | 'y'>>, label = 'Edit label'): void {
+    this.editLabels(label, (list) => list.map((l) => (l.id === id ? { ...l, ...change } : l)));
+  }
+
+  deleteLabel(id: string): void {
+    this.editLabels('Delete label', (list) => list.filter((l) => l.id !== id));
+    if (this.selectedLabelId === id) this.selectLabel(null);
+  }
+
+  setShowLabels(on: boolean): void {
+    this.showLabels = on;
+    this.saveViewPrefs();
+    this.requestFrame();
+  }
+
+  // ---------------------------------------------------------------- tee sets
+  /** The tee set being played (yardage labels and strategy use it). Remembered per browser. */
+  teeSetId: string | null = null;
+
+  get teeSets(): TeeSet[] {
+    return teeSets(this.doc);
+  }
+
+  /** The chosen tee set's id, or the first set if that one isn't in this course. */
+  get activeTeeSetId(): string {
+    const sets = this.teeSets;
+    return sets.some((s) => s.id === this.teeSetId) ? this.teeSetId! : sets[0].id;
+  }
+
+  setTeeSet(id: string): void {
+    this.teeSetId = id;
+    this.saveViewPrefs();
+    this.emit('holes', 'selection');
+    this.requestFrame();
+  }
+
+  /** Replace the course's tee sets (one undo step). */
+  setTeeSets(next: TeeSet[], label = 'Edit tee sets'): void {
+    this.history.begin(label);
+    this.history.snapshotTeeSets();
+    this.history.snapshotHoles();
+    const r = applyTeeSets(this.doc, next);
+    this.doc.teeSets = r.teeSets;
+    this.doc.holes = r.holes;
+    this.history.commit();
+    this.emit('holes', 'selection');
+    this.requestFrame();
+  }
+
+  /** Place, move or (with null) remove one tee set's tee on a hole. */
+  setTee(holeId: string, setId: string, at: Vec2 | null, label = at ? 'Place tee' : 'Remove tee'): void {
+    const sets = this.teeSets;
+    const i = this.doc.holes.findIndex((h) => h.id === holeId);
+    if (i < 0) return;
+    this.history.begin(label);
+    this.history.snapshotHoles();
+    const holes = this.doc.holes.slice();
+    holes[i] = withTee(holes[i], setId, sets, at);
+    this.doc.holes = holes;
+    this.history.commit();
+    this.emit('holes', 'selection');
+    this.requestFrame();
   }
 
   deleteHole(id: string): void {
@@ -1074,9 +1188,13 @@ export class Editor {
         });
       } else if (l.kind === 'image' && !l.above) drawUnderlay(ctx, l, inPx, 1 / ypp, () => this.requestFrame());
     }
-    ctx.imageSmoothingEnabled = this.zoom < 1;
-    ctx.imageSmoothingQuality = 'medium';
-    ctx.drawImage(this.docCanvas, 0, 0, W, H);
+    const crisp = this.crispShapes && this.zoom >= CRISP_MIN_ZOOM && this.doc.layers.some((l) => l.kind === 'vector' && l.visible && l.features.length > 0);
+    if (crisp) drawCrisp(ctx, this.doc, this.visiblePx(), this.zoom, this.docRev);
+    else {
+      ctx.imageSmoothingEnabled = this.zoom < 1;
+      ctx.imageSmoothingQuality = 'medium';
+      ctx.drawImage(this.docCanvas, 0, 0, W, H);
+    }
     for (const l of images) if (l.above) drawUnderlay(ctx, l, inPx, 1 / ypp, () => this.requestFrame());
     const tl = this.terrainLayer();
     if (tl?.visible && this.doc.terrain) {
@@ -1108,7 +1226,11 @@ export class Editor {
         arcsToGreen: this.arcsToGreen,
         handles: this.tool.id === 'hole',
         elevation: this.doc.terrain ? (w) => this.elevationAt(w) : undefined,
+        sets: this.teeSets,
+        activeSetId: this.activeTeeSetId,
       });
+    if (this.showLabels)
+      drawLabels(ctx, this.doc.labels, { toScreen, unitsPerYard: upy, selectedId: this.tool.id === 'text' ? this.selectedLabelId : null, angle: (this.rotation * Math.PI) / 180 });
     const img = this.activeImage();
     if (img && (this.tool.id === 'underlay' || this.tool.id === 'scale' || this.activeLayer === img)) {
       drawUnderlayFrame(ctx, img, toScreen);
@@ -1297,7 +1419,7 @@ export class Editor {
     const players = list.length ? list : [this.players[0]];
     this.surfaceCodes();
     return players.map((player) => {
-      const shots = planShots(hole, player);
+      const shots = planShots(hole, player, teeOf(hole, this.activeTeeSetId, this.teeSets));
       const odds = shots.map((s) => {
         const key = shotKey(s);
         let o = this.oddsCache.get(key);
@@ -1318,8 +1440,9 @@ export class Editor {
       if (typeof p.showYardGrid === 'boolean') this.showYardGrid = p.showYardGrid;
       if ([25, 50, 100].includes(p.yardGridSize)) this.yardGridSize = p.yardGridSize;
       if (typeof p.pixelGridZoom === 'number') this.pixelGridZoom = p.pixelGridZoom;
-      for (const k of ['showHoles', 'arcsFromTee', 'arcsToGreen', 'showPixelTarget', 'showStrategy'] as const) if (typeof p[k] === 'boolean') this[k] = p[k];
+      for (const k of ['showHoles', 'arcsFromTee', 'arcsToGreen', 'showPixelTarget', 'showStrategy', 'showLabels', 'crispShapes'] as const) if (typeof p[k] === 'boolean') this[k] = p[k];
       if (typeof p.strategyPlayer === 'string') this.strategyPlayer = p.strategyPlayer;
+      if (typeof p.teeSetId === 'string') this.teeSetId = p.teeSetId;
       if (['offset', 'gap', 'standard'].includes(p.cursorStyle)) this.cursorStyle = p.cursorStyle;
     } catch {
       /* storage unavailable — use defaults */
@@ -1328,10 +1451,10 @@ export class Editor {
 
   private saveViewPrefs(): void {
     try {
-      const { showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget, showStrategy, strategyPlayer } = this;
+      const { showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget, showStrategy, strategyPlayer, teeSetId, showLabels, crispShapes } = this;
       localStorage.setItem(
         'fairway-view',
-        JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget, showStrategy, strategyPlayer }),
+        JSON.stringify({ showYardGrid, yardGridSize, pixelGridZoom, showHoles, arcsFromTee, arcsToGreen, cursorStyle, showPixelTarget, showStrategy, strategyPlayer, teeSetId, showLabels, crispShapes }),
       );
     } catch {
       /* ignore */

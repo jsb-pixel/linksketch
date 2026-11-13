@@ -256,3 +256,217 @@ test.describe('Editor accessibility', () => {
     await expect(page.locator('#menubar .menu.open .menu-item', { hasText: '10 handicap' })).toHaveCount(0);
   });
 });
+
+test.describe('Tee sets', () => {
+  test('adds tee sets, places a forward tee and shows a scorecard column per set', async ({ page }) => {
+    await openApp(page);
+    await drawHole(page, [500, 900], [500, 500]);
+    await menu(page, 'Holes', 'Tee sets…');
+    const dialog = page.getByRole('dialog', { name: 'Tee sets' });
+    await dialog.getByRole('button', { name: '+ Add tee set' }).click();
+    await dialog.getByRole('button', { name: '+ Add tee set' }).click();
+    await expect(dialog.locator('tr')).toHaveCount(2);
+    await dialog.getByRole('button', { name: 'OK' }).click();
+    expect(await ed<string[]>(page, 'ed.doc.teeSets.map((t) => t.name)')).toEqual(['Back', 'Middle']);
+
+    // Scorecard: Hole, Par, Back, Middle.
+    const head = page.locator('#scorecard-panel tr').first().locator('th');
+    await expect(head).toHaveText(['Hole', 'Par', 'Back', 'Middle']);
+
+    // Place the Middle tee 60 yd up the hole.
+    await page.locator('#scorecard-panel tr').nth(1).click();
+    await page.locator('#info-panel .tee-row', { hasText: 'Middle' }).getByRole('button', { name: 'Place' }).click();
+    const p = await at(page, 500, 840);
+    await page.mouse.click(p.x, p.y);
+    const row = page.locator('#scorecard-panel tr').nth(1).locator('td');
+    const backYd = Number(await row.nth(2).innerText());
+    const midYd = Number(await row.nth(3).innerText());
+    expect(Math.abs(backYd - 400)).toBeLessThanOrEqual(2);
+    expect(Math.abs(midYd - 340)).toBeLessThanOrEqual(3);
+
+    // One undo step each: the tee, then the sets.
+    await page.keyboard.press('Control+z');
+    expect(await ed<unknown>(page, 'ed.doc.holes[0].tees ?? null')).toBeNull();
+    await page.keyboard.press('Control+z');
+    expect(await ed<unknown>(page, 'ed.doc.teeSets ?? null')).toBeNull();
+    await expect(page.locator('#scorecard-panel tr').first().locator('th')).toHaveText(['Hole', 'Par', 'Yards']);
+  });
+});
+
+test.describe('Exports, stats and labels', () => {
+  /** A short hole with a fairway, a green and a bunker to measure. */
+  async function paintHole(page: import('@playwright/test').Page): Promise<void> {
+    await ed(page, `(() => {
+      const W = ed.doc.width;
+      const base = ed.doc.layers[0];
+      const code = (id) => ['fairway','green','tee','bunker','waste','water'].indexOf(id) + 1;
+      const rect = (x, y, w, h, id) => { for (let j = y; j < y + h; j++) base.pixels.fill(code(id), j * W + x, j * W + x + w); };
+      rect(480, 520, 40, 380, 'fairway');
+      rect(485, 485, 30, 35, 'green');
+      rect(525, 640, 14, 20, 'bunker');
+      ed.invalidate();
+      return true;
+    })()`);
+    await drawHole(page, [500, 900], [500, 500]);
+  }
+
+  test('adds, edits, moves and deletes a text label', async ({ page }) => {
+    await openApp(page);
+    await tool(page, 'text');
+    const p = await at(page, 900, 600);
+    await page.mouse.click(p.x, p.y);
+    const dialog = page.getByRole('dialog', { name: 'Add label' });
+    await dialog.getByLabel('Text').fill('Clubhouse');
+    await dialog.getByLabel('Size').selectOption('24');
+    await dialog.getByRole('button', { name: 'OK' }).click();
+    expect(await ed<unknown>(page, 'ed.doc.labels.map((l) => [l.text, l.size])')).toEqual([['Clubhouse', 24]]);
+    await expect(page.locator('#info-panel')).toContainText('Text label');
+
+    // Drag it 100 yd east.
+    await page.waitForTimeout(450); // so the press isn't read as a double‑click
+    await drag(page, [[900, 600], [1000, 600]]);
+    const x = await ed<number>(page, 'ed.doc.labels[0].x');
+    expect(Math.abs(x - 1000)).toBeLessThan(6);
+    await page.keyboard.press('Control+z');
+    expect(Math.abs((await ed<number>(page, 'ed.doc.labels[0].x')) - 900)).toBeLessThan(6);
+
+    await page.keyboard.press('Backspace');
+    expect(await ed<unknown>(page, 'ed.doc.labels ?? null')).toBeNull();
+    await page.keyboard.press('Control+z');
+    expect(await ed<number>(page, 'ed.doc.labels.length')).toBe(1);
+  });
+
+  test('shows course stats in the Info panel and exports them', async ({ page }) => {
+    await openApp(page);
+    await paintHole(page);
+    await page.locator('#info-panel details.stats summary').click();
+    const stats = page.locator('#info-panel details.stats');
+    await expect(stats).toContainText('Bunkers1');
+    await expect(stats).toContainText(/Greens1 · 9,450 sq ft/);
+    await expect(stats).toContainText(/Yardage40[0-2] yd/);
+    await stats.getByRole('button', { name: 'All stats & export…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Course stats' });
+    await expect(dialog).toContainText('Fairway');
+    const [download] = await Promise.all([page.waitForEvent('download'), dialog.getByRole('button', { name: 'Export CSV' }).click()]);
+    expect(download.suggestedFilename()).toBe('Untitled course - stats.csv');
+    const csv = readFileSync(await download.path(), 'utf8');
+    expect(csv).toContain('Bunkers,1');
+    expect(csv).toMatch(/Fairway,3\.1\d\d,15200/);
+  });
+
+  test('exports a yardage‑book page for the selected hole', async ({ page }) => {
+    await openApp(page);
+    await paintHole(page);
+    const [download] = await Promise.all([page.waitForEvent('download'), menu(page, 'Holes', 'Export hole page (PNG)')]);
+    expect(download.suggestedFilename()).toBe('Untitled course - hole 1.png');
+    const bytes = readFileSync(await download.path());
+    expect(bytes.readUInt32BE(16)).toBe(1275);
+    expect(bytes.readUInt32BE(20)).toBe(1650);
+    expect(bytes.length).toBeGreaterThan(20_000);
+  });
+
+  test('exports every hole as a multi‑page PDF', async ({ page }) => {
+    await openApp(page);
+    await paintHole(page);
+    await drawHole(page, [800, 900], [800, 740]);
+    const [download] = await Promise.all([page.waitForEvent('download'), menu(page, 'Holes', 'Export all hole pages (PDF)')]);
+    expect(download.suggestedFilename()).toBe('Untitled course - yardage book.pdf');
+    const pdf = readFileSync(await download.path()).toString('latin1');
+    expect(pdf.startsWith('%PDF-1.4')).toBe(true);
+    expect(pdf.match(/\/Type \/Page /g)).toHaveLength(2);
+    expect(pdf.trimEnd().endsWith('%%EOF')).toBe(true);
+  });
+
+  test('exports a presentation sheet with a title block and legend', async ({ page }) => {
+    await openApp(page);
+    await paintHole(page);
+    const [download] = await Promise.all([page.waitForEvent('download'), menu(page, 'File', 'Export presentation sheet (PNG)')]);
+    expect(download.suggestedFilename()).toBe('Untitled course - presentation.png');
+    const bytes = readFileSync(await download.path());
+    // Bigger than the bare 2× course picture: margins, title, legend and footer were added.
+    expect(bytes.readUInt32BE(16)).toBeGreaterThan(4000);
+    expect(bytes.readUInt32BE(20)).toBeGreaterThan(2800);
+  });
+
+  test('crisp shapes draws smooth curves when zoomed in, without errors', async ({ page }) => {
+    const errors = watchErrors(page);
+    await openApp(page);
+    await tool(page, 'freehand');
+    await drag(page, loop(700, 600, 60));
+    // Nothing but the drawing on screen: no selection outline, pixel grid or brush cursor.
+    await tool(page, 'hand');
+    await page.mouse.move(5, 5);
+    await ed(page, `(ed.select(null), ed.setPixelGridZoom(0), ed.zoomAt({ x: 400, y: 300 }, 8), ed.centerOn({ x: 760, y: 600 }), true)`);
+    /** Count distinct colors along a short vertical line across the shape's right edge. */
+    const edgeColors = () =>
+      page.evaluate(() => {
+        const c = document.querySelector('#view') as HTMLCanvasElement;
+        const ctx = c.getContext('2d')!;
+        const d = ctx.getImageData(Math.round(c.width / 2) - 40, Math.round(c.height / 2) - 60, 80, 120).data;
+        const seen = new Set<number>();
+        for (let i = 0; i < d.length; i += 4) seen.add((d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
+        return seen.size;
+      });
+    await page.waitForTimeout(150);
+    const pixelated = await edgeColors();
+    await menu(page, 'View', 'Crisp shapes when zoomed in');
+    await page.waitForTimeout(150);
+    const crisp = await edgeColors();
+    // Hard pixels use only the palette (fill, outline, paper); smooth curves blend at the edge.
+    expect(pixelated).toBeLessThanOrEqual(4);
+    expect(crisp).toBeGreaterThan(pixelated);
+    expect(await ed<boolean>(page, 'ed.crispShapes')).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  test('reminds you where work is saved, and links to feedback', async ({ page }) => {
+    await openApp(page);
+    const note = page.locator('#save-note');
+    await expect(note).toContainText('Kept in this browser only');
+    await note.click();
+    await expect(page.getByRole('dialog', { name: 'Where is my work saved?' })).toContainText('File → Save');
+    await page.keyboard.press('Escape');
+    const [download] = await Promise.all([page.waitForEvent('download'), page.keyboard.press('Control+s')]);
+    await download.path();
+    await expect(note).toContainText('Saved to a file');
+
+    const [popup] = await Promise.all([page.waitForEvent('popup'), menu(page, 'Help', 'Send feedback…')]);
+    expect(popup.url()).toContain('github.com/jsb-pixel/linksketch/issues/new');
+    await popup.close();
+  });
+});
+
+test.describe('Installable app (PWA)', () => {
+  test('has a manifest and icons', async ({ page, request }) => {
+    await page.goto(APP);
+    const href = await page.locator('link[rel="manifest"]').getAttribute('href');
+    const manifest = await (await request.get(href!)).json();
+    expect(manifest.start_url).toBe('/linksketch/app/');
+    expect(manifest.display).toBe('standalone');
+    for (const icon of manifest.icons) expect((await request.get(icon.src)).ok()).toBe(true);
+    expect(manifest.icons.some((i: { sizes: string }) => i.sizes === '512x512')).toBe(true);
+  });
+
+  test('opens offline once visited, and caches nothing from other sites', async ({ page, context }) => {
+    await openApp(page);
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+    const cached = await page.evaluate(async () => {
+      const out: string[] = [];
+      for (const name of await caches.keys()) for (const req of await (await caches.open(name)).keys()) out.push(req.url);
+      return out;
+    });
+    expect(cached.length).toBeGreaterThan(3);
+    for (const url of cached) expect(new URL(url).origin).toBe(new URL(page.url()).origin);
+    expect(cached.some((u) => u.endsWith('/linksketch/app/'))).toBe(true);
+
+    await context.setOffline(true);
+    await page.reload();
+    await page.waitForFunction(() => !!(window as unknown as { fairway?: { ed?: { doc?: unknown } } }).fairway?.ed?.doc);
+    await expect(page.locator('#toolbox button.tool').first()).toBeVisible();
+    await tool(page, 'brush');
+    await drag(page, [[600, 600], [700, 620]]);
+    expect(await paintedPixels(page)).toBeGreaterThan(50);
+    await context.setOffline(false);
+  });
+});

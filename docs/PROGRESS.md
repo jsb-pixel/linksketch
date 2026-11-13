@@ -11,7 +11,14 @@ Hand‑off prompt: `docs/FABLE_PROMPT.md`. Review: `docs/REVIEW.md`.
       14 editor tests, GitHub Actions CI, `netlify.toml`. The build is now multi‑page:
       `site/build/generate.ts` writes pages into `.site/` (git‑ignored) and Vite builds from
       there; the editor is at `/linksketch/app/` (`site/app.html`).
-- [ ] 3. App features A1–A7
+- [~] **3. App features A1–A7** — all seven are built, unit-tested and e2e-tested:
+      tee sets (`model/tees.ts`), hole pages + PDF (`export/`), course stats (`model/stats.ts`),
+      presentation sheet + Text tool (`model/labels.ts`), crisp shapes (`render/crisp.ts`),
+      PWA (`site/build/sw.ts`, manifest, icons), feedback link + storage reminder.
+      Sample course: `scripts/make-sample.ts` → `public/samples/sample-course.fairway`.
+      **Still to do here:** e2e test for File → Open sample course; on hole pages the
+      "NN wide" label can overlap a strategy label, and the north-arrow "N" needs its
+      position checked when the page is rotated; update docs/DESIGN.md roadmap.
 - [ ] 4. Personal site + Linksketch section
 - [ ] 5. Design polish
 - [ ] 6. Quality bars (Lighthouse, a11y, weight)
@@ -43,3 +50,10 @@ Hand‑off prompt: `docs/FABLE_PROMPT.md`. Review: `docs/REVIEW.md`.
 - Gate before every commit: `npm run typecheck && npm test && npm run build && npm run e2e`.
 - Browser checks use the `test-sandbox` config (port 5174) or the Playwright server
   (port 4317). Never port 5173, never the owner's `fairway-paint` IndexedDB there.
+
+## Where the session of 2026-11-12 stopped (usage limit)
+
+Milestones 1–2 are committed and complete. Milestone 3 is committed in working order
+(gate green) with the small leftovers listed above. Milestones 4–7 (the personal site,
+design polish, Lighthouse, final report) are **not started**: `/` is still a placeholder
+page from `site/build/generate.ts`. No fonts have been added yet.

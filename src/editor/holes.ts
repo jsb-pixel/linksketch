@@ -1,6 +1,7 @@
 /** Drawing holes (line of play, tee marker, flag, yardage) and distance arcs. */
 import { dist, pathLength } from '../geom/geom';
-import type { Hole, Vec2 } from '../model/types';
+import type { Hole, TeeSet, Vec2 } from '../model/types';
+import { hasOwnTee, teeOf, yardsFor } from '../model/tees';
 
 export const TEE_ARCS = [150, 200, 250, 300];
 export const GREEN_ARCS = [50, 100, 150, 200];
@@ -20,6 +21,9 @@ export interface HoleDrawOptions {
   uiScale?: number;
   /** Ground height in feet (when the course has terrain). */
   elevation?: (w: Vec2) => number | null;
+  /** The course's tee sets and the one being played (yardage labels use it). */
+  sets?: TeeSet[];
+  activeSetId?: string | null;
 }
 
 /** Elevation change tee → green in feet (positive = uphill), or null. */
@@ -44,7 +48,16 @@ export function drawHoles(ctx: CanvasRenderingContext2D, holes: Hole[], o: HoleD
     const scr = h.points.map(o.toScreen);
     drawFlag(ctx, scr[scr.length - 1], k);
     drawTee(ctx, scr[0], h.number, k);
-    drawLabel(ctx, h, scr, k, sel, holeClimb(h, o.elevation));
+    const sets = o.sets ?? [];
+    for (const set of sets.slice(1)) {
+      if (!hasOwnTee(h, set.id, sets)) continue;
+      const t = o.toScreen(teeOf(h, set.id, sets));
+      // The selected hole shows how each tee joins the line of play.
+      if (sel) drawTeeLine(ctx, t, scr[1], set.color, k);
+      drawTeeMarker(ctx, t, set.color, k, set.id === o.activeSetId);
+    }
+    const yards = sets.length ? yardsFor(h, o.activeSetId, sets) : holeYards(h);
+    drawLabel(ctx, h, scr, k, sel, holeClimb(h, o.elevation), yards);
     if (sel && o.handles) {
       ctx.save();
       for (const s of scr) {
@@ -103,7 +116,7 @@ function drawTee(ctx: CanvasRenderingContext2D, s: Vec2, n: number, k: number): 
   ctx.restore();
 }
 
-function drawFlag(ctx: CanvasRenderingContext2D, s: Vec2, k: number): void {
+export function drawFlag(ctx: CanvasRenderingContext2D, s: Vec2, k: number): void {
   ctx.save();
   ctx.strokeStyle = '#000';
   ctx.lineWidth = 1.5 * k;
@@ -128,7 +141,35 @@ function drawFlag(ctx: CanvasRenderingContext2D, s: Vec2, k: number): void {
   ctx.restore();
 }
 
-function drawLabel(ctx: CanvasRenderingContext2D, h: Hole, scr: Vec2[], k: number, sel: boolean, climb: number | null): void {
+/** A small colored square for a tee set's tee. */
+export function drawTeeMarker(ctx: CanvasRenderingContext2D, s: Vec2, color: string, k: number, active = false): void {
+  const r = (active ? 5.5 : 4.5) * k;
+  ctx.save();
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(Math.round(s.x - r - k), Math.round(s.y - r - k), (r + k) * 2, (r + k) * 2);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(Math.round(s.x - r), Math.round(s.y - r), r * 2, r * 2);
+  ctx.fillStyle = color;
+  ctx.fillRect(Math.round(s.x - r + k), Math.round(s.y - r + k), (r - k) * 2, (r - k) * 2);
+  ctx.restore();
+}
+
+function drawTeeLine(ctx: CanvasRenderingContext2D, a: Vec2, b: Vec2, color: string, k: number): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.lineWidth = 3 * k;
+  ctx.stroke();
+  ctx.setLineDash([3 * k, 3 * k]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.25 * k;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawLabel(ctx: CanvasRenderingContext2D, h: Hole, scr: Vec2[], k: number, sel: boolean, climb: number | null, yards = holeYards(h)): void {
   // Put the label behind the tee, away from the line of play.
   const a = scr[0];
   const b = scr[1];
@@ -136,7 +177,7 @@ function drawLabel(ctx: CanvasRenderingContext2D, h: Hole, scr: Vec2[], k: numbe
   const ux = (a.x - b.x) / d;
   const uy = (a.y - b.y) / d;
   const climbText = climb !== null && Math.abs(climb) >= 1 ? ` · ${climb > 0 ? '↑' : '↓'}${Math.round(Math.abs(climb))} ft` : '';
-  const text = `${holeYards(h)} yd · Par ${h.par}${climbText}`;
+  const text = `${yards} yd · Par ${h.par}${climbText}`;
   ctx.save();
   ctx.font = `bold ${11 * k}px system-ui, sans-serif`;
   const w = ctx.measureText(text).width + 10 * k;

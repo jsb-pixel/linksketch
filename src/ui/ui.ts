@@ -1,5 +1,7 @@
 import { dist, polygonArea, pathLength } from '../geom/geom';
 import { holeYards, playsLike } from '../editor/holes';
+import { hasOwnTee, teeTotals, yardsFor } from '../model/tees';
+import { courseStats, type CourseStats } from '../model/stats';
 import { minMax, type BrushMode } from '../terrain/terrain';
 import { MAP_SOURCES } from '../editor/maptiles';
 import { formatLatLon, worldToLatLon } from '../geo/geo';
@@ -38,6 +40,7 @@ const TOOL_ORDER: ToolId[] = [
   'ruler',
   'hole',
   'terrain',
+  'text',
   'select',
   'freehand',
   'polygon',
@@ -580,12 +583,71 @@ export function buildInfoPanel(ed: Editor): void {
 
   const row = (k: string, v: string) => h('div', { class: 'kv' }, h('span', { textContent: k }), h('b', { textContent: v }));
 
+  // Course stats: worked out only while the section is open, and only when the drawing changed.
+  let statsOpen = false;
+  let statsCache: { doc: unknown; rev: number; holes: unknown; sets: unknown; stats: CourseStats } | null = null;
+  const statsSection = (): HTMLElement => {
+    const det = h('details', { class: 'stats' });
+    det.open = statsOpen;
+    det.append(h('summary', { textContent: 'Course stats' }));
+    const fill = () => {
+      const c = statsCache;
+      if (!c || c.doc !== ed.doc || c.rev !== ed.revision || c.holes !== ed.doc.holes || c.sets !== ed.doc.teeSets)
+        statsCache = { doc: ed.doc, rev: ed.revision, holes: ed.doc.holes, sets: ed.doc.teeSets, stats: courseStats(ed.doc) };
+      const s = statsCache!.stats;
+      const rows: Node[] = [];
+      if (s.holes) {
+        rows.push(row('Holes', `${s.holes} · par ${s.par}`));
+        for (const y of s.yardage) rows.push(row(s.yardage.length > 1 || ed.doc.teeSets?.length ? `${y.name} tees` : 'Yardage', `${y.yards.toLocaleString()} yd`));
+      }
+      rows.push(row('Greens', s.greenCount ? `${s.greenCount} · ${Math.round(s.greensSqFt).toLocaleString()} sq ft` : 'none'));
+      rows.push(row('Bunkers', String(s.bunkerCount)));
+      for (const x of s.surfaces.slice(0, 8)) rows.push(row(x.name, x.acres >= 0.1 ? `${x.acres.toFixed(1)} ac` : formatArea(x.sqYd)));
+      const more = h('button', { class: 'small', textContent: 'All stats & export…' });
+      more.addEventListener('click', () => window.dispatchEvent(new Event('fairway:stats')));
+      rows.push(h('div', { class: 'btn-row' }, more));
+      det.append(...rows);
+    };
+    if (statsOpen) fill();
+    det.addEventListener('toggle', () => {
+      if (det.open === statsOpen) return;
+      statsOpen = det.open;
+      if (statsOpen && det.children.length === 1) fill();
+    });
+    return det;
+  };
+
   const render = () => {
     const parts: Node[] = [];
     const hole = ed.selectedHole();
     if (hole) {
       parts.push(h('div', { class: 'info-head', textContent: `Hole ${hole.number}` }));
-      parts.push(row('Yardage', `${holeYards(hole)} yd`));
+      const sets = ed.teeSets;
+      if (sets.length < 2) parts.push(row('Yardage', `${holeYards(hole)} yd`));
+      else {
+        // One line per tee set: yardage, and a button to place or remove its tee.
+        for (const set of sets) {
+          const dot = h('span', { class: 'tee-dot' });
+          dot.style.background = set.color;
+          const line = h('div', { class: `kv tee-row${set.id === ed.activeTeeSetId ? ' active' : ''}` }, h('span', {}, dot, set.name), h('b', { textContent: `${yardsFor(hole, set.id, sets)} yd` }));
+          if (set !== sets[0]) {
+            const own = hasOwnTee(hole, set.id, sets);
+            const place = h('button', { class: 'small', textContent: own ? 'Move' : 'Place', title: `Click, then click on the course where the ${set.name} tee goes` });
+            place.addEventListener('click', () => {
+              ed.setTool('hole');
+              (ed.tool as { placeTee?: (holeId: string, setId: string) => void }).placeTee?.(hole.id, set.id);
+            });
+            line.append(place);
+            if (own) {
+              const rm = h('button', { class: 'small', textContent: '✕', title: `Remove the ${set.name} tee from this hole (it then plays from the ${sets[0].name} tee)` });
+              rm.setAttribute('aria-label', `Remove the ${set.name} tee`);
+              rm.addEventListener('click', () => ed.setTee(hole.id, set.id, null));
+              line.append(rm);
+            }
+          }
+          parts.push(line);
+        }
+      }
       if (ed.doc.terrain) {
         const tee = ed.elevationAt(hole.points[0])!;
         const green = ed.elevationAt(hole.points[hole.points.length - 1])!;
@@ -772,17 +834,30 @@ export function buildInfoPanel(ed: Editor): void {
       clr.addEventListener('click', () => ed.clearRuler());
       parts.push(h('div', { class: 'btn-row' }, clr));
     }
+    const label = ed.tool.id === 'text' ? ed.selectedLabel() : null;
+    if (label) {
+      parts.push(h('div', { class: 'info-head', textContent: 'Text label' }));
+      parts.push(row('Text', label.text));
+      parts.push(row('Size', `${label.size} yd tall`));
+      const edit = h('button', { class: 'small', textContent: 'Edit…' });
+      edit.addEventListener('click', () => (ed.tool as { editDialog?: (id: string, at: { x: number; y: number }) => void }).editDialog?.(label.id, label));
+      const del = h('button', { class: 'small', textContent: 'Delete' });
+      del.addEventListener('click', () => ed.deleteLabel(label.id));
+      parts.push(h('div', { class: 'btn-row' }, edit, del));
+    }
     const d = ed.doc;
     parts.push(h('div', { class: 'info-head', textContent: 'Course' }));
     parts.push(row('Name', d.name));
     parts.push(row('Area', `${Math.round(d.width * d.yardsPerPixel)} × ${Math.round(d.height * d.yardsPerPixel)} yd`));
     parts.push(row('1 pixel', `${d.yardsPerPixel} yd`));
+    parts.push(statsSection());
     body.replaceChildren(...parts);
   };
   ed.on('selection', render);
   ed.on('doc', render);
   ed.on('tool', render);
   ed.on('holes', render);
+  ed.on('history', () => statsOpen && render());
   // ruler updates arrive as 'status' (frequent) — only re-render when a ruler exists
   ed.on('status', () => {
     if (ed.ruler.points.length || body.querySelector('.info-head')?.textContent === 'Measurement') render();
@@ -803,16 +878,32 @@ export function buildScorecard(ed: Editor): void {
       body.replaceChildren(h('div', { class: 'tip', textContent: 'No holes yet. Pick the Hole tool (O): click the tee, any aim points, then double‑click the green.' }));
       return;
     }
+    const sets = ed.teeSets;
+    const named = sets.length > 1 || !!ed.doc.teeSets?.length;
     const table = h('table');
-    table.append(h('tr', {}, h('th', { textContent: 'Hole' }), h('th', { textContent: 'Par' }), h('th', { textContent: 'Yards' })));
-    const total = (hs: typeof holes, label: string) =>
-      h(
+    const head = h('tr', {}, h('th', { textContent: 'Hole' }), h('th', { textContent: 'Par' }));
+    for (const set of sets) {
+      // One yardage column per tee set; click a heading to play from that set.
+      const th = h('th', { class: `tee-col${set.id === ed.activeTeeSetId && sets.length > 1 ? ' active' : ''}`, title: named ? `${set.name} tees — click to play from them` : 'Yards' });
+      if (named) {
+        const dot = h('span', { class: 'tee-dot' });
+        dot.style.background = set.color;
+        th.append(dot, set.name);
+        th.addEventListener('click', () => ed.setTeeSet(set.id));
+      } else th.textContent = 'Yards';
+      head.append(th);
+    }
+    table.append(head);
+    const totals = (hs: typeof holes, label: string, pick: 'out' | 'in' | 'total') => {
+      const t = teeTotals(holes, sets);
+      return h(
         'tr',
         { class: 'total' },
         h('td', { textContent: label }),
         h('td', { textContent: String(hs.reduce((n, x) => n + x.par, 0)) }),
-        h('td', { textContent: hs.reduce((n, x) => n + holeYards(x), 0).toLocaleString() }),
+        ...t.map((x) => h('td', { textContent: x[pick].toLocaleString() })),
       );
+    };
     const front = holes.filter((x) => x.number <= 9);
     const back = holes.filter((x) => x.number > 9);
     const split = front.length > 0 && back.length > 0;
@@ -822,7 +913,7 @@ export function buildScorecard(ed: Editor): void {
         { class: x.id === ed.selectedHoleId ? 'sel' : '' },
         h('td', { textContent: String(x.number) }),
         h('td', { textContent: String(x.par) }),
-        h('td', { textContent: holeYards(x).toLocaleString() }),
+        ...sets.map((set) => h('td', { textContent: yardsFor(x, set.id, sets).toLocaleString() })),
       );
       tr.addEventListener('click', () => {
         ed.selectHole(x.id);
@@ -830,10 +921,10 @@ export function buildScorecard(ed: Editor): void {
         ed.centerOn(mid);
       });
       table.append(tr);
-      if (split && x === front[front.length - 1]) table.append(total(front, 'Out'));
+      if (split && x === front[front.length - 1]) table.append(totals(front, 'Out', 'out'));
     }
-    if (split) table.append(total(back, 'In'));
-    table.append(total(holes, 'Total'));
+    if (split) table.append(totals(back, 'In', 'in'));
+    table.append(totals(holes, 'Total', 'total'));
     body.replaceChildren(table);
   };
   ed.on('holes', render);
@@ -857,7 +948,10 @@ export function buildStatusBar(ed: Editor): void {
     rot.blur();
   });
   const rotCell = h('label', { class: 'cell rot-cell', title: 'View rotation' }, '↻ ', rot, '°');
-  bar.append(hint, layer, pos, rotCell, zoom);
+  // A standing reminder that the browser copy is not a backup.
+  const note = h('button', { class: 'cell save-note', id: 'save-note', type: 'button', title: 'Where is my work saved? Click for details.' });
+  note.addEventListener('click', () => window.dispatchEvent(new Event('fairway:storage')));
+  bar.append(hint, note, layer, pos, rotCell, zoom);
   const render = () => {
     hint.textContent = ed.message || ed.tool.hint;
     const hv = ed.hover;

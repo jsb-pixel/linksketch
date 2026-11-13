@@ -78,12 +78,13 @@ export interface Shot {
   custom: boolean;
 }
 
-export function planShots(hole: Hole, p: PlayerProfile): Shot[] {
+/** `tee` overrides where the first shot is played from (another tee set). */
+export function planShots(hole: Hole, p: PlayerProfile, tee?: Vec2): Shot[] {
   const out: Shot[] = [];
   const pts = hole.points;
   if (pts.length < 2) return out;
   const green = pts[pts.length - 1];
-  let from = pts[0];
+  let from = tee ?? pts[0];
   const add = (planned: Vec2, toGreen: boolean, extra: boolean): boolean => {
     const custom = hole.targets?.[out.length] ?? null;
     const target = custom ?? planned;
