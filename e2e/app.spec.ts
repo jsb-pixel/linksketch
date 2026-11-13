@@ -158,15 +158,62 @@ test.describe('Linksketch editor', () => {
     expect(bytes.readUInt32BE(20)).toBe(1400);
   });
 
+  /** What the autosave database holds right now (null if nothing). */
+  const savedText = (page: import('@playwright/test').Page) =>
+    page.evaluate(
+      () =>
+        new Promise<string | null>((resolve) => {
+          const req = indexedDB.open('fairway-paint', 1);
+          req.onupgradeneeded = () => req.result.createObjectStore('kv');
+          req.onsuccess = () => {
+            const db = req.result;
+            const get = db.transaction('kv', 'readonly').objectStore('kv').get('autosave');
+            get.onsuccess = () => {
+              db.close();
+              resolve(typeof get.result === 'string' ? get.result : null);
+            };
+            get.onerror = () => resolve(null);
+          };
+          req.onerror = () => resolve(null);
+        }),
+    );
+  const reloadApp = async (page: import('@playwright/test').Page) => {
+    await page.reload();
+    await page.waitForFunction(() => !!(window as unknown as { fairway?: { ed?: { doc?: unknown } } }).fairway?.ed?.doc);
+  };
+
   test('autosaves and restores the course on reload', async ({ page }) => {
     await openApp(page);
     await tool(page, 'brush');
     await drag(page, [[600, 600], [800, 650]]);
     const painted = await paintedPixels(page);
-    await page.waitForTimeout(2200); // autosave is debounced by 1.5 s
-    await page.reload();
-    await page.waitForFunction(() => !!(window as unknown as { fairway?: { ed?: { doc?: unknown } } }).fairway?.ed?.doc);
+    // Autosave is debounced by 1.5 s; wait until the stroke has really been written.
+    await expect
+      .poll(async () => {
+        const t = await savedText(page);
+        if (!t) return false;
+        // Empty paint layers all encode to the same length; the painted one is longer.
+        const sizes = (JSON.parse(t).layers as { rle?: string }[]).filter((l) => typeof l.rle === 'string').map((l) => l.rle!.length);
+        return Math.max(...sizes) > Math.min(...sizes);
+      }, { timeout: 15_000 })
+      .toBe(true);
+    await reloadApp(page);
     await expect(page.locator('#statusbar')).toContainText('Restored your last session');
+    expect(await paintedPixels(page)).toBe(painted);
+  });
+
+  test('work done in the last second before closing the tab is not lost', async ({ page }) => {
+    // Regression (review R14): reload straight after a stroke, before the 1.5 s autosave fires.
+    await openApp(page);
+    await tool(page, 'brush');
+    await drag(page, [[600, 600], [800, 650]]);
+    const painted = await paintedPixels(page);
+    await reloadApp(page);
+    await expect(page.locator('#statusbar')).toContainText('Restored your last session');
+    expect(await paintedPixels(page)).toBe(painted);
+    // The emergency copy is handed over to the database and cleared.
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('fairway-pending'))).toBeNull();
+    await reloadApp(page);
     expect(await paintedPixels(page)).toBe(painted);
   });
 
@@ -433,6 +480,26 @@ test.describe('Exports, stats and labels', () => {
     const [popup] = await Promise.all([page.waitForEvent('popup'), menu(page, 'Help', 'Send feedback…')]);
     expect(popup.url()).toContain('github.com/jsb-pixel/linksketch/issues/new');
     await popup.close();
+  });
+});
+
+test.describe('Sample course', () => {
+  test('opens from the File menu with holes, tee sets and labels', async ({ page }) => {
+    const errors = watchErrors(page);
+    await openApp(page);
+    await menu(page, 'File', 'Open sample course');
+    await expect(page.locator('#statusbar')).toContainText('Opened the sample course');
+    await expect(page).toHaveTitle(/Kestrel Dunes/);
+    expect(await ed<number>(page, 'ed.doc.holes.length')).toBe(9);
+    expect(await ed<string[]>(page, 'ed.doc.teeSets.map((t) => t.name)')).toEqual(['Back', 'Middle', 'Forward']);
+    expect(await ed<number>(page, 'ed.doc.labels.length')).toBeGreaterThan(0);
+    expect(await shapeCount(page)).toBeGreaterThan(50);
+    await expect(page.locator('#scorecard-panel tr.total').last()).toContainText('36');
+    // It is a real course: strategy works on it.
+    await page.locator('#scorecard-panel tr').nth(4).click();
+    await page.keyboard.press('s');
+    await expect(page.locator('#info-panel .strat-shot').first()).toBeVisible();
+    expect(errors).toEqual([]);
   });
 });
 

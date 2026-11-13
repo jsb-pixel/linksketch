@@ -44,7 +44,7 @@ run against the old code and confirmed to fail there.
 | R29 | Low | **Strategy player choice could point at a player that isn't in the course**, leaving the picker blank. | `strategyPlayer` is a browser preference; players are per course. | `activeStrategyPlayer` falls back to the first player. |
 | R30 | Low | About box said v0.4. | Hard‑coded string. | `src/version.ts`. |
 | R31 | Low | **A click with one tool could count as the first half of a double‑click with the next.** Found by the end‑to‑end tests: finishing a hole on the green, switching to Select and pressing on the same spot within 0.4 s reset the shot target instead of dragging it. | `lastClick` survived a tool change. | Reset in `setTool()`. Covered by the strategy end‑to‑end test. |
-| R14 | Low | **The last 1.5 s of work could be lost on closing the tab.** | Autosave is debounced and nothing flushed it. | Flushed on `pagehide` and when the tab is hidden. |
+| R14 | Medium | **The last 1.5 s of work could be lost on closing or reloading the tab.** | Autosave is debounced and nothing flushed it. A first fix (write to the database on `pagehide`) turned out not to work: an end‑to‑end test showed Chromium drops a database write started while the page is closing. | On `pagehide` / tab hidden the course is also written to `localStorage` (synchronous, so it always lands), picked up on the next start and handed to the database. Covered by the e2e test "work done in the last second before closing the tab is not lost". |
 
 ## Checked and found correct
 

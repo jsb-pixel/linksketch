@@ -369,7 +369,10 @@ export function renderHolePage(ed: Editor, hole: Hole, codes: Uint8Array = visib
     ctx.stroke();
     ctx.restore();
     const right = a.x > b.x ? a : b;
-    placed.push(boxed(ctx, `${fw.width} wide`, right.x + 10, right.y, 22, 'left', '#0a3d91'));
+    // Step up past anything already there (a strategy label often sits just right of the fairway).
+    let wy = right.y;
+    for (let n = 0; n < 8 && !clear({ x: right.x + 10, y: wy - 16, w: 130, h: 32 }); n++) wy -= 36;
+    placed.push(boxed(ctx, `${fw.width} wide`, right.x + 10, wy, 22, 'left', '#0a3d91'));
   }
 
   // Hazards: yards from the tee to reach, and to carry.

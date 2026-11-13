@@ -44,6 +44,8 @@ export const SAMPLE_URL = '/samples/sample-course.fairway';
 
 const AUTOSAVE_KEY = 'autosave';
 const AUTOSAVE_DELAY = 1500;
+/** localStorage key for a course saved while the tab was closing (see flushAutosave). */
+const PENDING_KEY = 'fairway-pending';
 
 // File System Access API (Chrome/Edge). Safari falls back to download/upload.
 interface FileHandle {
@@ -113,20 +115,44 @@ export class App {
     }, AUTOSAVE_DELAY);
   }
 
-  /** Write the autosave right now (the tab is being hidden or closed). */
+  /**
+   * Write the autosave right now (the tab is being hidden or closed). A database write
+   * started while a page is closing is often dropped by the browser, so the course is
+   * also put in localStorage, which is written immediately; it is picked up on the next
+   * start and removed once the database has it.
+   */
   private flushAutosave(): void {
     if (!this.autosaveTimer) return;
     window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = 0;
-    idbSet(AUTOSAVE_KEY, serialize(this.ed.doc)).catch((err) => console.warn('Autosave failed', err));
+    const text = serialize(this.ed.doc);
+    try {
+      localStorage.setItem(PENDING_KEY, text);
+    } catch {
+      /* too big for localStorage, or storage is off: the database write below is the only chance */
+    }
+    idbSet(AUTOSAVE_KEY, text)
+      .then(() => localStorage.removeItem(PENDING_KEY))
+      .catch((err) => console.warn('Autosave failed', err));
   }
 
   private async restoreAutosave(): Promise<void> {
     try {
-      const text = await idbGet<string>(AUTOSAVE_KEY);
+      // A copy left by a closing tab is newer than whatever reached the database.
+      let pending: string | null = null;
+      try {
+        pending = localStorage.getItem(PENDING_KEY);
+      } catch {
+        /* storage is off */
+      }
+      const text = pending ?? (await idbGet<string>(AUTOSAVE_KEY));
       if (!text) return;
       this.ed.setDoc(deserialize(text));
       this.ed.setMessage('Restored your last session (autosaved).');
+      if (pending) {
+        await idbSet(AUTOSAVE_KEY, pending);
+        localStorage.removeItem(PENDING_KEY);
+      }
     } catch (err) {
       console.warn('Could not restore autosave', err);
     }
