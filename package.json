@@ -10,9 +10,15 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "e2e": "npm run build && playwright test",
-    "gate": "npm run typecheck && npm test && npm run build && npm run e2e"
+    "gate": "npm run typecheck && npm test && npm run build && npm run e2e",
+    "shots": "npm run build && node scripts/shots.mjs",
+    "sample": "vite-node scripts/make-sample.ts"
   },
   "devDependencies": {
+    "@fontsource-variable/archivo": "^5.3.0",
+    "@fontsource-variable/newsreader": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/silkscreen": "^5.3.0",
     "@playwright/test": "^1.65.0",
     "@types/node": "^26.6.6",
     "marked": "^18.2.0",

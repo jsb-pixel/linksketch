@@ -18,7 +18,7 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 } } }],
   webServer: {
-    command: `npx vite preview --port ${PORT} --strictPort`,
+    command: `node scripts/serve.mjs ${PORT}`,
     url: `http://localhost:${PORT}/linksketch/app/`,
     reuseExistingServer: false,
     timeout: 60_000,

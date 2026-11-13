@@ -136,6 +136,24 @@ export class App {
       .catch((err) => console.warn('Autosave failed', err));
   }
 
+  /**
+   * A link like /linksketch/app/?sample=1 opens the sample course — but never over
+   * work in progress without asking first.
+   */
+  private async openSampleFromLink(hadCourse: boolean): Promise<void> {
+    if (new URLSearchParams(location.search).get('sample') !== '1') return;
+    history.replaceState(null, '', location.pathname);
+    if (!hadCourse) return this.openSample();
+    dialog(
+      'Open the sample course?',
+      h('div', { class: 'about' }, h('p', { textContent: `You have a course in progress (“${this.ed.doc.name}”). Opening the sample replaces it in this browser.` }), h('p', { textContent: 'Save it to a file first (File → Save) if you want to keep it.' })),
+      [
+        { label: 'Keep my course', primary: true, onClick: () => {} },
+        { label: 'Open the sample', onClick: () => void this.openSample() },
+      ],
+    );
+  }
+
   private async restoreAutosave(): Promise<void> {
     try {
       // A copy left by a closing tab is newer than whatever reached the database.
@@ -146,15 +164,17 @@ export class App {
         /* storage is off */
       }
       const text = pending ?? (await idbGet<string>(AUTOSAVE_KEY));
-      if (!text) return;
+      if (!text) return void this.openSampleFromLink(false);
       this.ed.setDoc(deserialize(text));
       this.ed.setMessage('Restored your last session (autosaved).');
       if (pending) {
         await idbSet(AUTOSAVE_KEY, pending);
         localStorage.removeItem(PENDING_KEY);
       }
+      void this.openSampleFromLink(true);
     } catch (err) {
       console.warn('Could not restore autosave', err);
+      void this.openSampleFromLink(false);
     }
   }
 

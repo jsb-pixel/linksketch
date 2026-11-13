@@ -1,9 +1,8 @@
-// Starts a production preview server on a private port for scripts that need the built site.
+// Serves the built site (dist/) on a private port for scripts that need it.
 import { spawn } from 'node:child_process';
 
 export async function withServer(port, fn) {
-  // Run Vite directly (not through npx) so stopping it really stops the server.
-  const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', 'preview', '--port', String(port), '--strictPort'], { stdio: 'ignore' });
+  const server = spawn(process.execPath, ['scripts/serve.mjs', String(port)], { stdio: 'ignore' });
   const base = `http://localhost:${port}`;
   try {
     for (let i = 0; i < 60; i++) {

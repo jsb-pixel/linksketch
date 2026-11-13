@@ -1,0 +1,42 @@
+{
+  "editor": {
+    "w": 1360,
+    "h": 860,
+    "alt": "The Linksketch editor showing the nine-hole sample course, with the toolbox, palette, layers and scorecard"
+  },
+  "scorecard": {
+    "w": 201,
+    "h": 221,
+    "alt": "The scorecard panel with a yardage column for the Back, Middle and Forward tees"
+  },
+  "course": {
+    "w": 1200,
+    "h": 800,
+    "alt": "Plan of Kestrel Dunes, a fictional nine-hole course painted in Linksketch"
+  },
+  "strategy": {
+    "w": 1000,
+    "h": 696,
+    "alt": "The fourth hole turned to play up the screen, with a 10 handicap’s landing ovals and the odds of finding trouble"
+  },
+  "holepage": {
+    "w": 820,
+    "h": 1061,
+    "alt": "A yardage-book page for hole 4: distances to hazards, yards to the green and the fairway width"
+  },
+  "terrain": {
+    "w": 1000,
+    "h": 696,
+    "alt": "Part of the sample course with hillshade and five-foot contour lines drawn over it"
+  },
+  "sheet": {
+    "w": 1200,
+    "h": 1011,
+    "alt": "The presentation sheet: the course with a title block, legend, scale bar and north arrow"
+  },
+  "crisp": {
+    "w": 972,
+    "h": 400,
+    "alt": "A green and bunker at 800% zoom: on the left as pixels, on the right with crisp shapes switched on"
+  }
+}
