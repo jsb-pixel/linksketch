@@ -5,6 +5,7 @@ import type { Feature, ImageLayer, RasterLayer, Rect, Vec2, VectorLayer } from '
 import { dialog, field } from '../ui/ui';
 import { worldToLatLon, type GeoRef } from '../geo/geo';
 import { createTerrain, dab, heightAtPx, type BrushMode } from '../terrain/terrain';
+import { targetsAfterPointInserted, targetsAfterPointRemoved } from '../strategy/strategy';
 import { drawPlayLine } from './holes';
 import { flatten, visibleCodes } from '../render/raster';
 import { floodRegion, forEachPixel } from '../render/regions';
@@ -981,6 +982,10 @@ export class HoleTool implements Tool {
     return null;
   }
 
+  claims(screen: Vec2): boolean {
+    return !!this.hitPoint(screen);
+  }
+
   down(e: PointerInfo): void {
     const ed = this.ed;
     const p = clampWorld(ed, e.world);
@@ -994,7 +999,7 @@ export class HoleTool implements Tool {
       const hole = ed.doc.holes.find((h) => h.id === hp.id)!;
       ed.selectHole(hp.id);
       if (e.alt) {
-        if (hole.points.length > 2) ed.updateHole(hp.id, 'Delete hole point', (h) => ({ points: h.points.filter((_, i) => i !== hp.index) }));
+        if (hole.points.length > 2) ed.updateHole(hp.id, 'Delete hole point', (h) => ({ points: h.points.filter((_, i) => i !== hp.index), targets: targetsAfterPointRemoved(h.targets, hp.index) }));
         return;
       }
       ed.history.begin('Move hole point');
@@ -1005,7 +1010,7 @@ export class HoleTool implements Tool {
     const hl = this.hitLine(e.screen);
     if (hl) {
       ed.selectHole(hl.id);
-      if (e.clicks >= 2) ed.updateHole(hl.id, 'Add aim point', (h) => ({ points: [...h.points.slice(0, hl.leg + 1), hl.at, ...h.points.slice(hl.leg + 1)] }));
+      if (e.clicks >= 2) ed.updateHole(hl.id, 'Add aim point', (h) => ({ points: [...h.points.slice(0, hl.leg + 1), hl.at, ...h.points.slice(hl.leg + 1)], targets: targetsAfterPointInserted(h.targets, hl.leg + 1) }));
       return;
     }
     ed.selectHole(null);

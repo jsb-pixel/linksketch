@@ -119,6 +119,37 @@ export function planShots(hole: Hole, p: PlayerProfile): Shot[] {
   return out;
 }
 
+/**
+ * Cache key for a shot's landing odds: everything `samplePoint` reads. (Tilt matters —
+ * a left‑hander's pattern is the mirror image with the same centre and spreads.)
+ */
+export function shotKey(s: Shot): string {
+  return [s.center.x.toFixed(2), s.center.y.toFixed(2), s.dir.x.toFixed(4), s.dir.y.toFixed(4), s.sigmaSide.toFixed(2), s.sigmaDepth.toFixed(2), s.tilt.toFixed(4)].join(',');
+}
+
+/**
+ * Shot targets are stored by shot number (shot k is played to point k+1), so they
+ * must follow when a point is added to or taken out of the line of play.
+ */
+export function targetsAfterPointRemoved(targets: (Vec2 | null)[] | undefined, pointIndex: number): (Vec2 | null)[] | undefined {
+  if (!targets) return undefined;
+  const out = targets.slice();
+  out.splice(Math.max(0, pointIndex - 1), 1);
+  return trimTargets(out);
+}
+export function targetsAfterPointInserted(targets: (Vec2 | null)[] | undefined, pointIndex: number): (Vec2 | null)[] | undefined {
+  if (!targets) return undefined;
+  const out = targets.slice();
+  const at = Math.max(0, pointIndex - 1);
+  while (out.length < at) out.push(null);
+  out.splice(at, 0, null);
+  return trimTargets(out);
+}
+function trimTargets(out: (Vec2 | null)[]): (Vec2 | null)[] | undefined {
+  while (out.length && !out[out.length - 1]) out.pop();
+  return out.length ? out : undefined;
+}
+
 // ---------------------------------------------------------------- outcomes
 export type Outcome = 'fairway' | 'green' | 'rough' | 'fescue' | 'sand' | 'water' | 'trees' | 'other' | 'out';
 

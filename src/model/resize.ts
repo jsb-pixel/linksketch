@@ -42,7 +42,15 @@ export function resizeDoc(doc: CourseDoc, rect: Rect, maxPixels: number): void {
     }
     return l;
   });
-  doc.holes = doc.holes.map((h) => ({ ...h, points: h.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) }));
+  const shift = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
+  doc.holes = doc.holes.map((h) => ({
+    ...h,
+    points: h.points.map(shift),
+    // Dragged shot targets and extra tees are world points too.
+    ...(h.targets ? { targets: h.targets.map((t) => (t ? shift(t) : null)) } : {}),
+    ...(h.tees ? { tees: Object.fromEntries(Object.entries(h.tees).map(([id, t]) => [id, shift(t)])) } : {}),
+  }));
+  if (doc.labels) doc.labels = doc.labels.map((l) => ({ ...l, x: l.x + dx, y: l.y + dy }));
   // The new top-left corner is the old point (nx, ny).
   if (doc.geo) {
     const ll = worldToLatLon(doc.geo, { x: nx * k, y: ny * k });

@@ -4,7 +4,7 @@ import { History } from '../model/history';
 import { surfaceByCode, surfaceById } from '../model/surfaces';
 import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, MapLayer, MapSource, RasterLayer, Rect, TerrainLayer, Vec2, VectorLayer } from '../model/types';
 import { drawHoles } from './holes';
-import { drawUnderlay, drawUnderlayFrame } from './underlay';
+import { drawUnderlay, drawUnderlayFrame, pruneImages } from './underlay';
 import { drawAttribution, drawMap, MAP_SOURCES } from './maptiles';
 import { drawTerrain } from '../terrain/render';
 import { cssCursor, type CursorStyle } from './cursors';
@@ -18,7 +18,8 @@ import { applyColors, rgbCss, surfaceCode, surfaceColor, type ColorMap, type Sur
 import { createMapLayer, createTerrainLayer, MAX_DOC_PIXELS, uid } from '../model/doc';
 import { MIN_SIDE_PX, resizeDoc } from '../model/resize';
 import { setDetail } from '../model/detail';
-import { DEFAULT_PLAYERS, landingOdds, planShots, type Odds, type PlayerProfile, type Shot } from '../strategy/strategy';
+import { DEFAULT_PLAYERS, landingOdds, planShots, shotKey, type Odds, type PlayerProfile, type Shot } from '../strategy/strategy';
+import { panAfterOriginShift } from './viewmath';
 import { drawShots } from '../strategy/draw';
 import { visibleCodes } from '../render/raster';
 
@@ -75,6 +76,8 @@ export interface Tool {
   cancel?(): void;
   /** Return true if handled. */
   keydown?(e: KeyboardEvent): boolean;
+  /** True if the tool has its own handle under the pointer (it wins over shot targets). */
+  claims?(screen: Vec2): boolean;
   /** Draw screen‑space overlay (context already in CSS px). */
   overlay?(ctx: CanvasRenderingContext2D): void;
 }
@@ -222,6 +225,9 @@ export class Editor {
     };
     this.appliedColors = '';
     this.syncColors();
+    pruneImages(new Set(doc.layers.flatMap((l) => (l.kind === 'image' ? [l.src] : []))));
+    this.codes = null;
+    this.oddsCache.clear();
     this.docCanvas.width = doc.width;
     this.docCanvas.height = doc.height;
     this.lastYpp = doc.yardsPerPixel;
@@ -613,6 +619,13 @@ export class Editor {
     this.setMessage(`Combined ${shapes.length} shapes into one ${name} shape${mixed ? ' (it takes the first shape’s surface)' : ''}.`);
   }
 
+  /** Take shapes on a layer out of the selection (the layer was hidden or locked). */
+  dropSelectionOnLayer(layerId: string): void {
+    const refs = this.selectedRefs();
+    const keep = refs.filter((r) => r.layerId !== layerId);
+    if (keep.length !== refs.length) this.selectMany(keep);
+  }
+
   setRegion(r: PixelSelection | null): void {
     this.region = r;
     if (r) {
@@ -824,11 +837,11 @@ export class Editor {
   // ---------------------------------------------------------------- commands
   undo(): void {
     this.tool.cancel?.();
-    if (this.history.undo()) this.invalidate();
+    if (this.history.undo()) this.invalidate(this.history.lastRect);
   }
   redo(): void {
     this.tool.cancel?.();
-    if (this.history.redo()) this.invalidate();
+    if (this.history.redo()) this.invalidate(this.history.lastRect);
   }
 
   deleteSelection(): void {
@@ -1078,7 +1091,11 @@ export class Editor {
     if (this.showHoles && this.showStrategy) {
       const hole = this.selectedHole();
       const placed: { x: number; y: number; w: number; h: number }[] = [];
-      if (hole) for (const r of this.strategyFor(hole)) drawShots(ctx, r.player, r.shots, r.odds, { toScreen, unitsPerYard: upy, placed });
+      if (hole) {
+        const all = this.strategyFor(hole);
+        // Several players at once: short labels, or the hole disappears under text.
+        for (const r of all) drawShots(ctx, r.player, r.shots, r.odds, { toScreen, unitsPerYard: upy, placed, compact: all.length > 1 });
+      }
     }
     if (this.showHoles)
       drawHoles(ctx, this.doc.holes, {
@@ -1182,6 +1199,12 @@ export class Editor {
     return this.doc.players ?? DEFAULT_PLAYERS;
   }
 
+  /** The chosen player id, or the first player if that id isn't in this course. */
+  get activeStrategyPlayer(): string {
+    if (this.strategyPlayer === 'all') return 'all';
+    return this.players.some((p) => p.id === this.strategyPlayer) ? this.strategyPlayer : this.players[0].id;
+  }
+
   setStrategy(change: { show?: boolean; player?: string }): void {
     if (change.show !== undefined) this.showStrategy = change.show;
     if (change.player !== undefined) this.strategyPlayer = change.player;
@@ -1207,6 +1230,8 @@ export class Editor {
   /** Oval centre under the pointer (strategy shown, Select or Hole tool). */
   hitShot(screen: Vec2): { holeId: string; index: number; grab: Vec2 } | null {
     if (!this.showStrategy || !this.showHoles || !['select', 'hole'].includes(this.tool.id)) return null;
+    // A hole point under the pointer belongs to the Hole tool (shot centres sit on aim points).
+    if (this.tool.claims?.(screen)) return null;
     const hole = this.selectedHole();
     if (!hole) return null;
     let best: { holeId: string; index: number; grab: Vec2 } | null = null;
@@ -1266,13 +1291,13 @@ export class Editor {
 
   /** Landing patterns + odds for each shown player on a hole. */
   strategyFor(hole: Hole): { player: PlayerProfile; shots: Shot[]; odds: Odds[] }[] {
-    const list = this.strategyPlayer === 'all' ? this.players : this.players.filter((p) => p.id === this.strategyPlayer);
+    const list = this.strategyPlayer === 'all' ? this.players : this.players.filter((p) => p.id === this.activeStrategyPlayer);
     const players = list.length ? list : [this.players[0]];
     this.surfaceCodes();
     return players.map((player) => {
       const shots = planShots(hole, player);
       const odds = shots.map((s) => {
-        const key = `${s.center.x.toFixed(2)},${s.center.y.toFixed(2)},${s.dir.x.toFixed(4)},${s.dir.y.toFixed(4)},${s.sigmaSide.toFixed(2)},${s.sigmaDepth.toFixed(2)}`;
+        const key = shotKey(s);
         let o = this.oddsCache.get(key);
         if (!o) {
           o = landingOdds(s, this.strategySurface);
@@ -1679,6 +1704,14 @@ export class Editor {
       }
     });
 
+    // The key‑up is lost if the window loses focus while Space is held.
+    window.addEventListener('blur', () => {
+      if (this.spaceHeld) {
+        this.spaceHeld = false;
+        this.updateCursor();
+      }
+    });
+
     new ResizeObserver(() => this.resize()).observe(c.parentElement!);
   }
 
@@ -1700,8 +1733,9 @@ export class Editor {
     }
     this.history.commit();
     // Keep the content where it was on screen.
-    this.panX += Math.round(rect.x) * this.zoom;
-    this.panY += Math.round(rect.y) * this.zoom;
+    const pan = panAfterOriginShift({ x: this.panX, y: this.panY }, { x: Math.round(rect.x), y: Math.round(rect.y) }, this.zoom, this.rotation);
+    this.panX = pan.x;
+    this.panY = pan.y;
     this.region = null;
     this.clearRuler();
     this.syncCanvasSize();

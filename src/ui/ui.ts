@@ -66,58 +66,117 @@ export interface MenuItem {
   separator?: boolean;
 }
 
-export function buildMenuBar(menus: { title: string; items: MenuItem[] }[]): void {
+export interface Menu {
+  title: string;
+  /** A function is evaluated each time the menu opens (for lists that change, like players). */
+  items: MenuItem[] | (() => MenuItem[]);
+}
+
+export function buildMenuBar(menus: Menu[]): void {
   const bar = $('#menubar');
-  let open: HTMLElement | null = null;
-  const close = () => {
-    open?.classList.remove('open');
+  bar.setAttribute('role', 'menubar');
+  const wraps: { wrap: HTMLElement; title: HTMLButtonElement; list: HTMLElement; render: () => void }[] = [];
+  let open: (typeof wraps)[number] | null = null;
+  const close = (refocus = false) => {
+    if (!open) return;
+    open.wrap.classList.remove('open');
+    open.title.setAttribute('aria-expanded', 'false');
+    if (refocus) open.title.focus();
     open = null;
   };
+  const show = (w: (typeof wraps)[number], focusFirst = false) => {
+    if (open && open !== w) close();
+    w.render();
+    w.wrap.classList.add('open');
+    w.title.setAttribute('aria-expanded', 'true');
+    open = w;
+    if (focusFirst) rows(w)[0]?.focus();
+  };
+  const rows = (w: (typeof wraps)[number]) => [...w.list.querySelectorAll<HTMLElement>('.menu-item:not(.disabled)')];
+
   for (const m of menus) {
-    const title = h('div', { class: 'menu-title', textContent: m.title });
+    const title = h('button', { class: 'menu-title', textContent: m.title, type: 'button' });
+    title.setAttribute('role', 'menuitem');
+    title.setAttribute('aria-haspopup', 'true');
+    title.setAttribute('aria-expanded', 'false');
     const list = h('div', { class: 'menu-list' });
+    list.setAttribute('role', 'menu');
+    list.setAttribute('aria-label', m.title);
     const wrap = h('div', { class: 'menu' }, title, list);
     const render = () => {
+      const items = typeof m.items === 'function' ? m.items() : m.items;
       list.replaceChildren(
-        ...m.items.map((it) => {
+        ...items.map((it) => {
           if (it.separator) return h('hr');
           const enabled = it.enabled ? it.enabled() : true;
+          const checked = it.checked?.();
           const row = h(
             'div',
-            { class: `menu-item${enabled ? '' : ' disabled'}` },
-            h('span', { class: 'check', textContent: it.checked?.() ? '✓' : '' }),
+            { class: `menu-item${enabled ? '' : ' disabled'}`, tabIndex: -1 },
+            h('span', { class: 'check', textContent: checked ? '✓' : '' }),
             h('span', { class: 'label', textContent: it.label }),
             h('span', { class: 'shortcut', textContent: it.shortcut ?? '' }),
           );
-          row.addEventListener('pointerup', () => {
+          row.setAttribute('role', it.checked ? 'menuitemcheckbox' : 'menuitem');
+          if (it.checked) row.setAttribute('aria-checked', String(!!checked));
+          if (!enabled) row.setAttribute('aria-disabled', 'true');
+          const run = () => {
             if (!enabled) return;
             close();
             it.action?.();
+          };
+          row.addEventListener('pointerup', run);
+          row.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              run();
+            }
           });
           return row;
         }),
       );
     };
+    const entry = { wrap, title, list, render };
+    wraps.push(entry);
     title.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
-      if (open === wrap) return close();
-      close();
-      render();
-      wrap.classList.add('open');
-      open = wrap;
+      if (open === entry) return close();
+      show(entry);
     });
     title.addEventListener('pointerenter', () => {
-      if (open && open !== wrap) {
-        close();
-        render();
-        wrap.classList.add('open');
-        open = wrap;
+      if (open && open !== entry) show(entry);
+    });
+    // Keyboard: Enter/Space/↓ opens, ←/→ moves between menus, ↑/↓ between items, Esc closes.
+    wrap.addEventListener('keydown', (e) => {
+      const i = wraps.indexOf(entry);
+      const onTitle = document.activeElement === title;
+      const list = rows(entry);
+      const at = list.indexOf(document.activeElement as HTMLElement);
+      let handled = true;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        const next = wraps[(i + (e.key === 'ArrowRight' ? 1 : wraps.length - 1)) % wraps.length];
+        if (open) show(next, true);
+        else next.title.focus();
+      } else if (onTitle && (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown')) show(entry, true);
+      else if (open === entry && e.key === 'ArrowDown') list[(at + 1) % list.length]?.focus();
+      else if (open === entry && e.key === 'ArrowUp') list[(at - 1 + list.length) % list.length]?.focus();
+      else if (open === entry && e.key === 'Home') list[0]?.focus();
+      else if (open === entry && e.key === 'End') list[list.length - 1]?.focus();
+      else if (open && e.key === 'Escape') close(true);
+      else handled = false;
+      if (handled) {
+        e.preventDefault();
+        e.stopPropagation();
       }
     });
     bar.append(wrap);
   }
   document.addEventListener('pointerdown', (e) => {
-    if (open && !open.contains(e.target as Node)) close();
+    if (open && !open.wrap.contains(e.target as Node)) close();
+  });
+  bar.addEventListener('focusout', (e) => {
+    if (open && !bar.contains(e.relatedTarget as Node | null) && e.relatedTarget) close();
   });
 }
 
@@ -134,11 +193,17 @@ export function buildToolbox(ed: Editor): void {
       title: `${t.name} (${t.key.toUpperCase()})`,
       innerHTML: TOOL_ICONS[id],
     });
+    b.setAttribute('aria-label', t.name);
+    b.dataset.tool = id;
     b.addEventListener('click', () => ed.setTool(id));
     buttons.set(id, b);
     box.append(b);
   }
-  const sync = () => buttons.forEach((b, id) => b.classList.toggle('active', ed.tool.id === id));
+  const sync = () =>
+    buttons.forEach((b, id) => {
+      b.classList.toggle('active', ed.tool.id === id);
+      b.setAttribute('aria-pressed', String(ed.tool.id === id));
+    });
   ed.on('tool', sync);
   sync();
 
@@ -405,7 +470,8 @@ export function buildLayersPanel(ed: Editor): void {
           e.stopPropagation();
           l.visible = !l.visible;
           ed.invalidate();
-          if (!l.visible && ed.selection?.layerId === l.id) ed.select(null);
+          if (!l.visible) ed.dropSelectionOnLayer(l.id);
+          ed.emit('history'); // saved with the course (not an undo step, like Paint's view options)
           render();
         });
         const lock = h('button', {
@@ -416,7 +482,8 @@ export function buildLayersPanel(ed: Editor): void {
         lock.addEventListener('click', (e) => {
           e.stopPropagation();
           l.locked = !l.locked;
-          if (l.locked && ed.selection?.layerId === l.id) ed.select(null);
+          if (l.locked) ed.dropSelectionOnLayer(l.id);
+          ed.emit('history');
           render();
         });
         let outline: HTMLElement | string = '';
@@ -428,9 +495,11 @@ export function buildLayersPanel(ed: Editor): void {
           });
           ob.addEventListener('click', (e) => {
             e.stopPropagation();
+            ed.history.begin(l.outline ? 'Outlines off' : 'Outlines on');
+            ed.history.snapshotMeta();
             l.outline = !l.outline;
+            ed.history.commit();
             ed.invalidate();
-            ed.emit('history');
             render();
           });
           outline = ob;
@@ -484,9 +553,12 @@ export function buildLayersPanel(ed: Editor): void {
         });
         row.addEventListener('dblclick', () => {
           const n = prompt('Layer name', l.name);
-          if (n && n.trim()) {
-            l.name = n.trim();
-            render();
+          if (n && n.trim() && n.trim() !== l.name) {
+            ed.history.begin('Rename layer');
+            ed.history.snapshotMeta();
+            l.name = n.trim().slice(0, 60);
+            ed.history.commit();
+            ed.emit('doc');
           }
         });
         return row;
@@ -810,39 +882,80 @@ export function buildStatusBar(ed: Editor): void {
 // =====================================================================
 // Dialogs
 // =====================================================================
+let dialogSeq = 0;
+
+/**
+ * A modal dialog. It is announced as a dialog, keeps Tab inside itself, closes on
+ * Escape wherever the focus is, and gives the focus back when it closes.
+ */
 export function dialog(title: string, content: HTMLElement, buttons: { label: string; primary?: boolean; onClick: () => boolean | void }[]): () => void {
   const overlay = h('div', { class: 'modal-overlay' });
   const btnRow = h('div', { class: 'dialog-buttons' });
+  const titleId = `dialog-title-${++dialogSeq}`;
   const win = h(
     'div',
     { class: 'window dialog' },
-    h('div', { class: 'title-bar', textContent: title }),
+    h('div', { class: 'title-bar', textContent: title, id: titleId }),
     h('div', { class: 'dialog-body' }, content),
     btnRow,
   );
-  const close = () => overlay.remove();
+  win.setAttribute('role', 'dialog');
+  win.setAttribute('aria-modal', 'true');
+  win.setAttribute('aria-labelledby', titleId);
+  win.tabIndex = -1;
+  const returnTo = document.activeElement as HTMLElement | null;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+    if (returnTo?.isConnected) returnTo.focus();
+  };
   for (const b of buttons) {
-    const el = h('button', { textContent: b.label, class: b.primary ? 'primary' : '' });
+    const el = h('button', { textContent: b.label, class: b.primary ? 'primary' : '', type: 'button' });
     el.addEventListener('click', () => {
       if (b.onClick() !== false) close();
     });
     btnRow.append(el);
   }
   overlay.append(win);
-  overlay.addEventListener('keydown', (e) => {
+  const focusable = () =>
+    [...win.querySelectorAll<HTMLElement>('input, select, textarea, button, [tabindex]:not([tabindex="-1"])')].filter((el) => !(el as HTMLButtonElement).disabled && el.offsetParent !== null);
+  // On the document, so Escape works even if the focus has left the dialog.
+  const onKey = (e: KeyboardEvent) => {
+    // Only the top‑most dialog reacts.
+    if (overlay !== document.querySelector('.modal-overlay:last-of-type')) return;
+    const inside = win.contains(e.target as Node);
     if (e.key === 'Escape') {
-      const cancel = buttons.find((b) => /cancel|close/i.test(b.label));
-      cancel?.onClick();
+      e.preventDefault();
+      e.stopPropagation();
+      buttons.find((b) => /cancel|close/i.test(b.label))?.onClick();
       close();
-    }
-    if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'BUTTON') {
+    } else if (e.key === 'Enter' && inside && !['BUTTON', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
       const primary = buttons.find((b) => b.primary);
+      e.stopPropagation();
       if (primary && primary.onClick() !== false) close();
-    }
-    e.stopPropagation();
-  });
+    } else if (e.key === 'Tab') {
+      const list = focusable();
+      if (!list.length) return;
+      const first = list[0];
+      const last = list[list.length - 1];
+      if (!inside) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    } else if (inside) e.stopPropagation();
+  };
+  document.addEventListener('keydown', onKey);
   document.body.append(overlay);
-  (win.querySelector('input, select, button') as HTMLElement | null)?.focus();
+  ((win.querySelector('.dialog-body input, .dialog-body select, .dialog-body textarea') ?? btnRow.querySelector('button.primary') ?? win) as HTMLElement).focus();
   return close;
 }
 
@@ -861,7 +974,7 @@ function strategySection(ed: Editor, hole: Hole): Node[] {
   cb.addEventListener('change', () => ed.setStrategy({ show: cb.checked }));
   parts.push(h('label', { class: 'opt' }, cb, 'Show landing patterns (S)'));
   const sel = h('select', { class: 'player-select' });
-  for (const p of ed.players) sel.append(h('option', { value: p.id, textContent: p.name, selected: p.id === ed.strategyPlayer }));
+  for (const p of ed.players) sel.append(h('option', { value: p.id, textContent: p.name, selected: p.id === ed.activeStrategyPlayer }));
   sel.append(h('option', { value: 'all', textContent: 'All players', selected: ed.strategyPlayer === 'all' }));
   sel.addEventListener('change', () => ed.setStrategy({ player: sel.value, show: true }));
   const edit = h('button', { class: 'small', textContent: 'Players…', title: 'Distances and accuracy for each player' });

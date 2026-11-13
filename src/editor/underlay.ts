@@ -16,6 +16,11 @@ export function getImage(src: string, onReady: () => void): HTMLImageElement | n
   return img.complete && img.naturalWidth ? img : null;
 }
 
+/** Forget decoded images that no open course uses (data URLs can be several MB each). */
+export function pruneImages(keep: Set<string>): void {
+  for (const src of [...cache.keys()]) if (!keep.has(src)) cache.delete(src);
+}
+
 /** Read an image file/blob, shrink huge ones, and return a compact data URL. */
 export async function loadImageBlob(blob: Blob): Promise<{ src: string; w: number; h: number }> {
   const url = URL.createObjectURL(blob);

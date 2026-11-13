@@ -110,6 +110,31 @@ input[type='checkbox'] {
 }
 .menu-title {
   padding: 3px 7px;
+  /* It is a real button (keyboard reachable) but looks like a flat Paint menu title. */
+  box-shadow: none;
+  background: none;
+  min-height: 0;
+}
+.menu-title:active {
+  box-shadow: none;
+  padding: 3px 7px;
+}
+.menu-title:focus-visible,
+.menu-item:focus-visible {
+  outline: 1px dotted #000;
+  outline-offset: -2px;
+}
+.menu-item:focus {
+  background: var(--hl);
+  color: var(--hl-text);
+  outline: none;
+}
+.menu-item.disabled:focus {
+  background: none;
+  color: var(--shadow);
+}
+.dialog:focus {
+  outline: none;
 }
 .menu.open .menu-title {
   background: var(--hl);

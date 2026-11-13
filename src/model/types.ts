@@ -106,6 +106,29 @@ export interface Hole {
    * the line of play (e.g. the middle of the green rather than the flag). null = default.
    */
   targets?: (Vec2 | null)[];
+  /**
+   * Tee positions for tee sets other than the first, by tee set id. The first (longest)
+   * set always tees off from `points[0]`; a set without an entry here does too.
+   */
+  tees?: Record<string, Vec2>;
+}
+
+/** A set of tees (Back / Middle / Forward …), named and colored per course. */
+export interface TeeSet {
+  id: string;
+  name: string;
+  /** CSS hex color, e.g. #1565c0. */
+  color: string;
+}
+
+/** A text label placed on the course (presentation). Position is its centre, in yards. */
+export interface TextLabel {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  /** Text height in yards, so labels scale with the course. */
+  size: number;
 }
 
 export interface CourseDoc {
@@ -128,4 +151,8 @@ export interface CourseDoc {
   holes: Hole[];
   /** Strategy‑mode player profiles (absent = defaults). */
   players?: PlayerProfile[];
+  /** Tee sets, longest first (absent = one unnamed set). */
+  teeSets?: TeeSet[];
+  /** Text labels (absent = none). */
+  labels?: TextLabel[];
 }

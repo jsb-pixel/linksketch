@@ -28,7 +28,11 @@ import {
   fromHex,
   h,
   toHex,
+  type Menu,
+  type MenuItem,
 } from './ui/ui';
+import { fitsCanvas } from './editor/viewmath';
+import { APP_VERSION } from './version';
 
 const AUTOSAVE_KEY = 'autosave';
 const AUTOSAVE_DELAY = 1500;
@@ -75,6 +79,9 @@ export class App {
     });
     this.ed.on('doc', () => this.updateTitle());
     this.updateTitle();
+    // Don't lose the last second and a half of work when the tab closes.
+    window.addEventListener('pagehide', () => this.flushAutosave());
+    document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && this.flushAutosave());
     void this.restoreAutosave();
   }
 
@@ -86,8 +93,17 @@ export class App {
   private scheduleAutosave(): void {
     window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = window.setTimeout(() => {
+      this.autosaveTimer = 0;
       idbSet(AUTOSAVE_KEY, serialize(this.ed.doc)).catch((err) => console.warn('Autosave failed', err));
     }, AUTOSAVE_DELAY);
+  }
+
+  /** Write the autosave right now (the tab is being hidden or closed). */
+  private flushAutosave(): void {
+    if (!this.autosaveTimer) return;
+    window.clearTimeout(this.autosaveTimer);
+    this.autosaveTimer = 0;
+    idbSet(AUTOSAVE_KEY, serialize(this.ed.doc)).catch((err) => console.warn('Autosave failed', err));
   }
 
   private async restoreAutosave(): Promise<void> {
@@ -469,11 +485,12 @@ export class App {
         label: 'OK',
         primary: true,
         onClick: () => {
+          this.ed.history.begin('Course properties');
+          this.ed.history.snapshotMeta();
           this.ed.doc.name = name.value.trim() || this.ed.doc.name;
           this.ed.doc.background = bg.value;
+          this.ed.history.commit();
           this.ed.invalidate();
-          this.unsaved = true;
-          this.scheduleAutosave();
           this.ed.emit('doc');
         },
       },
@@ -530,6 +547,10 @@ export class App {
 
   exportPng(scale: number): void {
     const ed = this.ed;
+    if (!fitsCanvas(ed.doc.width * scale, ed.doc.height * scale)) {
+      alert(`A ${scale}× picture of this course would be ${ed.doc.width * scale} × ${ed.doc.height * scale} pixels — too large for the browser. Pick a smaller scale.`);
+      return;
+    }
     ed.flushRender();
     const c = document.createElement('canvas');
     c.width = ed.doc.width * scale;
@@ -563,11 +584,15 @@ export class App {
       for (const r of ed.strategyFor(hole))
         drawShots(ctx, r.player, r.shots, r.odds, { toScreen: (w) => ({ x: w.x * k, y: w.y * k }), unitsPerYard: k, uiScale: Math.max(1, scale / 1.5), placed });
     }
-    c.toBlob((b) => b && download(b, this.fileName().replace(FILE_EXT, scale > 1 ? `@${scale}x.png` : '.png')), 'image/png');
+    c.toBlob((b) => {
+      // Safari silently gives nothing back when the canvas is over its size limit.
+      if (!b) return alert('This browser could not make a picture that large. Try a smaller scale (Export PNG 1× or 2×).');
+      download(b, this.fileName().replace(FILE_EXT, scale > 1 ? `@${scale}x.png` : '.png'));
+    }, 'image/png');
   }
 
   // ------------------------------------------------------------ menus & keys
-  private menus() {
+  private menus(): Menu[] {
     const ed = this.ed;
     return [
       {
@@ -709,18 +734,19 @@ export class App {
       },
       {
         title: 'Strategy',
-        items: [
+        // Built each time the menu opens, so renamed players show up.
+        items: () => [
           { label: 'Show landing patterns', shortcut: 'S', checked: () => ed.showStrategy, action: () => this.toggleStrategy() },
           { separator: true, label: '' },
           ...ed.players.map((p) => ({
             label: p.name,
-            checked: () => ed.strategyPlayer === p.id,
+            checked: () => ed.activeStrategyPlayer === p.id,
             action: () => ed.setStrategy({ player: p.id, show: true }),
           })),
           { label: 'All players', checked: () => ed.strategyPlayer === 'all', action: () => ed.setStrategy({ player: 'all', show: true }) },
           { separator: true, label: '' },
           { label: 'Players (distance & accuracy)…', action: () => this.playersDialog() },
-        ],
+        ] as MenuItem[],
       },
       {
         title: 'View',
@@ -985,7 +1011,7 @@ export class App {
       h(
         'div',
         { class: 'about' },
-        h('p', { textContent: 'Linksketch v0.4 — a pixel‑art golf course design tool.' }),
+        h('p', { textContent: `Linksketch v${APP_VERSION} — a pixel‑art golf course design tool.` }),
         h('p', { textContent: 'Every pixel has a real size, so shapes, areas and measurements are in yards.' }),
         h('p', { textContent: 'Your work autosaves in this browser. Use File → Save to keep a .fairway file.' }),
       ),

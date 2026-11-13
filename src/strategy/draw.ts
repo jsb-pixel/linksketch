@@ -12,6 +12,8 @@ export interface StrategyDrawOptions {
   labels?: boolean;
   /** Label boxes already drawn this pass (shared across players), to avoid overlaps. */
   placed?: Box[];
+  /** Short labels ("235 · 18%") for when several players are shown together. */
+  compact?: boolean;
 }
 
 function rgba(hex: string, a: number): string {
@@ -106,15 +108,22 @@ export function drawShots(
       ctx.restore();
     }
     const od = odds[s.index];
-    if (o.labels !== false && od) drawLabel(ctx, s, od, c, ang, rs * 2, player, k, o.placed ?? []);
+    if (o.labels !== false && od) drawLabel(ctx, s, od, c, ang, rs * 2, player, k, o.placed ?? [], !!o.compact);
   }
 }
 
-function drawLabel(ctx: CanvasRenderingContext2D, s: Shot, od: Odds, c: Vec2, ang: number, off: number, p: PlayerProfile, k: number, placed: Box[]): void {
+/** Label text for a shot. Compact = just distance and trouble share. */
+export function shotLabel(s: Shot, od: Odds, compact: boolean): string {
   const trouble = Math.round(troubleShare(od) * 100);
+  if (compact) return `${s.extra ? '+ ' : ''}${Math.round(s.yards)} · ${trouble}%`;
   const top = od.filter((x) => OUTCOMES[x.outcome].bad && x.share >= 0.03).slice(0, 2);
   const detail = top.map((x) => `${Math.round(x.share * 100)}% ${OUTCOMES[x.outcome].label}`).join(' · ');
-  const text = `${s.extra ? '+ ' : ''}${Math.round(s.yards)} yd${s.short > 1 ? ` (${Math.round(s.short)} short)` : ''} · ${trouble}% trouble${detail ? ` — ${detail}` : ''}`;
+  return `${s.extra ? '+ ' : ''}${Math.round(s.yards)} yd${s.short > 1 ? ` (${Math.round(s.short)} short)` : ''} · ${trouble}% trouble${detail ? ` — ${detail}` : ''}`;
+}
+
+function drawLabel(ctx: CanvasRenderingContext2D, s: Shot, od: Odds, c: Vec2, ang: number, off: number, p: PlayerProfile, k: number, placed: Box[], compact: boolean): void {
+  const trouble = Math.round(troubleShare(od) * 100);
+  const text = shotLabel(s, od, compact);
   ctx.save();
   ctx.font = `bold ${10 * k}px system-ui, sans-serif`;
   const w = ctx.measureText(text).width + 8 * k;
