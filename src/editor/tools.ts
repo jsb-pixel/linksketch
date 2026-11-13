@@ -5,6 +5,11 @@ import type { Feature, ImageLayer, RasterLayer, Rect, Vec2, VectorLayer } from '
 import { dialog, field } from '../ui/ui';
 import { worldToLatLon, type GeoRef } from '../geo/geo';
 import { createTerrain, dab, heightAtPx, type BrushMode } from '../terrain/terrain';
+import { targetsAfterPointInserted, targetsAfterPointRemoved } from '../strategy/strategy';
+import { hasOwnTee, teeOf, withTee } from '../model/tees';
+import { drawTeeMarker } from './holes';
+import { hitLabel, LABEL_SIZES } from '../model/labels';
+import { h } from '../ui/ui';
 import { drawPlayLine } from './holes';
 import { flatten, visibleCodes } from '../render/raster';
 import { floodRegion, forEachPixel } from '../render/regions';
@@ -949,12 +954,34 @@ export class HoleTool implements Tool {
   name = 'Hole (tee → aim points → green)';
   key = 'o';
   cursor = 'crosshair';
-  hint = 'Click the tee, click aim points, double‑click (or Enter) on the green · drag points to edit · 3/4/5 sets par · ⌫ deletes hole';
+  hint = 'Click the tee, click aim points, double‑click (or Enter) on the green · drag points or tee markers to edit · 3/4/5 sets par · ⌫ deletes hole';
   private pts: Vec2[] = [];
   private live: Vec2 | null = null;
   private drag: { id: string; index: number; moved: boolean } | null = null;
+  /** A tee of another tee set being dragged. */
+  private teeDrag: { id: string; setId: string; moved: boolean } | null = null;
+  /** Waiting for a click that places this tee set's tee on this hole. */
+  private placing: { id: string; setId: string } | null = null;
 
   constructor(private ed: Editor) {}
+
+  /** The next click places `setId`'s tee on the hole (Info panel → Place). */
+  placeTee(holeId: string, setId: string): void {
+    this.pts = [];
+    this.placing = { id: holeId, setId };
+    const name = this.ed.teeSets.find((s) => s.id === setId)?.name ?? 'tee';
+    this.ed.setMessage(`Click where the ${name} tee goes on this hole · Esc cancels`);
+    this.ed.requestFrame();
+  }
+
+  /** A placed tee (of a set other than the first) near the cursor. */
+  private hitTee(screen: Vec2): { id: string; setId: string } | null {
+    const sets = this.ed.teeSets;
+    for (const h of this.ed.doc.holes)
+      for (const set of sets.slice(1))
+        if (hasOwnTee(h, set.id, sets) && dist(this.ed.worldToScreen(teeOf(h, set.id, sets)), screen) <= HANDLE_RADIUS) return { id: h.id, setId: set.id };
+    return null;
+  }
 
   /** Hole point near the cursor (selected hole first). */
   private hitPoint(screen: Vec2): { id: string; index: number } | null {
@@ -981,9 +1008,29 @@ export class HoleTool implements Tool {
     return null;
   }
 
+  claims(screen: Vec2): boolean {
+    return !!this.placing || !!this.hitPoint(screen) || !!this.hitTee(screen);
+  }
+
   down(e: PointerInfo): void {
     const ed = this.ed;
     const p = clampWorld(ed, e.world);
+    if (this.placing) {
+      const { id, setId } = this.placing;
+      this.placing = null;
+      ed.setTee(id, setId, p);
+      ed.setMessage('');
+      return;
+    }
+    const ht = this.pts.length ? null : this.hitTee(e.screen);
+    if (ht && !this.hitPoint(e.screen)) {
+      ed.selectHole(ht.id);
+      if (e.alt) return ed.setTee(ht.id, ht.setId, null);
+      ed.history.begin('Move tee');
+      ed.history.snapshotHoles();
+      this.teeDrag = { ...ht, moved: false };
+      return;
+    }
     if (this.pts.length) {
       if (e.clicks >= 2) return this.finish();
       this.pts.push(p);
@@ -994,7 +1041,7 @@ export class HoleTool implements Tool {
       const hole = ed.doc.holes.find((h) => h.id === hp.id)!;
       ed.selectHole(hp.id);
       if (e.alt) {
-        if (hole.points.length > 2) ed.updateHole(hp.id, 'Delete hole point', (h) => ({ points: h.points.filter((_, i) => i !== hp.index) }));
+        if (hole.points.length > 2) ed.updateHole(hp.id, 'Delete hole point', (h) => ({ points: h.points.filter((_, i) => i !== hp.index), targets: targetsAfterPointRemoved(h.targets, hp.index) }));
         return;
       }
       ed.history.begin('Move hole point');
@@ -1005,7 +1052,7 @@ export class HoleTool implements Tool {
     const hl = this.hitLine(e.screen);
     if (hl) {
       ed.selectHole(hl.id);
-      if (e.clicks >= 2) ed.updateHole(hl.id, 'Add aim point', (h) => ({ points: [...h.points.slice(0, hl.leg + 1), hl.at, ...h.points.slice(hl.leg + 1)] }));
+      if (e.clicks >= 2) ed.updateHole(hl.id, 'Add aim point', (h) => ({ points: [...h.points.slice(0, hl.leg + 1), hl.at, ...h.points.slice(hl.leg + 1)], targets: targetsAfterPointInserted(h.targets, hl.leg + 1) }));
       return;
     }
     ed.selectHole(null);
@@ -1015,6 +1062,18 @@ export class HoleTool implements Tool {
 
   move(e: PointerInfo, dragging: boolean): void {
     const ed = this.ed;
+    if (this.placing) {
+      this.live = clampWorld(ed, e.world);
+      return;
+    }
+    if (this.teeDrag && dragging) {
+      const d = this.teeDrag;
+      const sets = ed.teeSets;
+      ed.doc.holes = ed.doc.holes.map((h) => (h.id === d.id ? withTee(h, d.setId, sets, clampWorld(ed, e.world)) : h));
+      d.moved = true;
+      ed.emit('holes', 'selection');
+      return;
+    }
     if (this.drag && dragging) {
       const d = this.drag;
       ed.doc.holes = ed.doc.holes.map((h) =>
@@ -1025,10 +1084,18 @@ export class HoleTool implements Tool {
       return;
     }
     if (this.pts.length) this.live = clampWorld(ed, e.world);
-    else ed.canvas.style.cursor = this.hitPoint(e.screen) ? 'move' : this.hitLine(e.screen) ? 'pointer' : ed.cursorCss(this.cursor);
+    else ed.canvas.style.cursor = this.hitPoint(e.screen) || this.hitTee(e.screen) ? 'move' : this.hitLine(e.screen) ? 'pointer' : ed.cursorCss(this.cursor);
   }
 
   up(): void {
+    if (this.teeDrag) {
+      const moved = this.teeDrag.moved;
+      this.teeDrag = null;
+      if (moved) this.ed.history.commit();
+      else this.ed.history.abort();
+      this.ed.emit('holes', 'selection');
+      return;
+    }
     if (!this.drag) return;
     const moved = this.drag.moved;
     this.drag = null;
@@ -1057,14 +1124,22 @@ export class HoleTool implements Tool {
   cancel(): void {
     this.pts = [];
     this.live = null;
-    if (this.drag) {
+    this.placing = null;
+    if (this.drag || this.teeDrag) {
       this.drag = null;
+      this.teeDrag = null;
       this.ed.history.abort();
     }
   }
 
   keydown(e: KeyboardEvent): boolean {
     const ed = this.ed;
+    if (this.placing) {
+      if (e.key !== 'Escape') return false;
+      this.placing = null;
+      ed.setMessage('');
+      return true;
+    }
     if (this.pts.length) {
       if (e.key === 'Enter') {
         this.finish();
@@ -1098,6 +1173,11 @@ export class HoleTool implements Tool {
   }
 
   overlay(ctx: CanvasRenderingContext2D): void {
+    if (this.placing && this.live) {
+      const set = this.ed.teeSets.find((s) => s.id === this.placing!.setId);
+      drawTeeMarker(ctx, this.ed.worldToScreen(this.live), set?.color ?? '#000', 1, true);
+      return;
+    }
     if (!this.pts.length) return;
     const pts = this.live ? [...this.pts, this.live] : this.pts;
     const scr = pts.map((p) => this.ed.worldToScreen(p));
@@ -1410,6 +1490,111 @@ export class TerrainTool implements Tool {
   }
 }
 
+// ---------------------------------------------------------------- text labels
+
+/** Click to place a text label; drag to move it; double‑click to edit. */
+export class TextTool implements Tool {
+  id = 'text' as const;
+  name = 'Text label';
+  key = 'a';
+  cursor = 'text';
+  hint = 'Click to add a label · drag a label to move it · double‑click to edit · ⌫ deletes · labels appear in exports';
+  private drag: { id: string; grab: Vec2; moved: boolean } | null = null;
+
+  constructor(private ed: Editor) {}
+
+  private hit(e: PointerInfo) {
+    const slop = (5 / this.ed.zoom) * this.ed.doc.yardsPerPixel;
+    return this.ed.showLabels ? hitLabel(this.ed.doc.labels, e.world, slop) : null;
+  }
+
+  down(e: PointerInfo): void {
+    const ed = this.ed;
+    const l = this.hit(e);
+    if (!l) {
+      ed.selectLabel(null);
+      if (!ed.showLabels) ed.setShowLabels(true);
+      return this.editDialog(null, clampWorld(ed, e.world));
+    }
+    ed.selectLabel(l.id);
+    if (e.clicks >= 2) return this.editDialog(l.id, l);
+    ed.history.begin('Move label');
+    ed.history.snapshotLabels();
+    this.drag = { id: l.id, grab: { x: l.x - e.world.x, y: l.y - e.world.y }, moved: false };
+  }
+
+  move(e: PointerInfo, dragging: boolean): void {
+    const d = this.drag;
+    if (!d || !dragging) {
+      if (!dragging) this.ed.canvas.style.cursor = this.hit(e) ? 'move' : 'text';
+      return;
+    }
+    const at = clampWorld(this.ed, { x: e.world.x + d.grab.x, y: e.world.y + d.grab.y });
+    this.ed.doc.labels = (this.ed.doc.labels ?? []).map((l) => (l.id === d.id ? { ...l, x: at.x, y: at.y } : l));
+    d.moved = true;
+  }
+
+  up(): void {
+    if (!this.drag) return;
+    const moved = this.drag.moved;
+    this.drag = null;
+    if (moved) this.ed.history.commit();
+    else this.ed.history.abort();
+  }
+
+  cancel(): void {
+    if (this.drag) {
+      this.drag = null;
+      this.ed.history.abort();
+    }
+  }
+
+  keydown(e: KeyboardEvent): boolean {
+    const sel = this.ed.selectedLabel();
+    if (!sel) return false;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      this.ed.deleteLabel(sel.id);
+      return true;
+    }
+    if (e.key === 'Enter') {
+      this.editDialog(sel.id, sel);
+      return true;
+    }
+    if (e.key === 'Escape') {
+      this.ed.selectLabel(null);
+      return true;
+    }
+    return false;
+  }
+
+  /** Ask for the words and size. `id` null = a new label at `at`. */
+  editDialog(id: string | null, at: Vec2): void {
+    const ed = this.ed;
+    const existing = id ? ed.doc.labels?.find((l) => l.id === id) : null;
+    const text = h('input', { value: existing?.text ?? '', maxLength: 120, class: 'wide', placeholder: 'e.g. Clubhouse, Practice green, 7' });
+    const size = h('select');
+    for (const s of LABEL_SIZES) size.append(h('option', { value: String(s.size), textContent: s.name }));
+    const current = existing?.size ?? 14;
+    if (!LABEL_SIZES.some((s) => s.size === current)) size.append(h('option', { value: String(current), textContent: `${current} yd` }));
+    size.value = String(current);
+    const body = h('div', { class: 'form' }, field('Text', text), field('Size', size, 'Sizes are in yards, so labels stay in proportion to the course.'));
+    dialog(existing ? 'Edit label' : 'Add label', body, [
+      ...(existing ? [{ label: 'Delete', onClick: () => ed.deleteLabel(existing.id) }] : []),
+      { label: 'Cancel', onClick: () => {} },
+      {
+        label: 'OK',
+        primary: true,
+        onClick: () => {
+          const t = text.value.trim();
+          if (!t) return false;
+          if (existing) ed.updateLabel(existing.id, { text: t, size: +size.value });
+          else ed.addLabel(at, t, +size.value);
+        },
+      },
+    ]);
+  }
+}
+
 export function registerAllTools(ed: Editor): void {
   for (const T of [
     SelectTool,
@@ -1429,6 +1614,7 @@ export function registerAllTools(ed: Editor): void {
     UnderlayTool,
     ScaleTool,
     TerrainTool,
+    TextTool,
   ]) {
     ed.registerTool(new T(ed));
   }

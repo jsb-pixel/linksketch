@@ -1,0 +1,27 @@
+[
+  {
+    "name": "Kestrel Dunes",
+    "location": "Fictional",
+    "holes": 9,
+    "par": 36,
+    "cover": "/courses/kestrel-dunes.webp",
+    "note": "The sample course that ships with Linksketch: nine holes over sandy ground, three ponds, and a par 5 that bends twice. Open it in the editor and move things around.",
+    "open": "/linksketch/app/?sample=1"
+  },
+  {
+    "name": "TODO(owner): one of your real designs",
+    "location": "TODO(owner): where it is, or “Fictional”",
+    "holes": 18,
+    "par": 72,
+    "cover": "",
+    "note": "TODO(owner): a short note about the idea behind it. Export a PNG from Linksketch (File → Export PNG), put it in public/courses/, and set “cover” to its path."
+  },
+  {
+    "name": "TODO(owner): another design",
+    "location": "TODO(owner): location",
+    "holes": 18,
+    "par": 71,
+    "cover": "",
+    "note": "TODO(owner): a short note."
+  }
+]

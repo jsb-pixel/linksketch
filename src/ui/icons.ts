@@ -52,4 +52,5 @@ export const TOOL_ICONS: Record<ToolId, string> = {
   hand: svg(
     '<path d="M4 8V4a1 1 0 0 1 2 0v3V2a1 1 0 0 1 2 0v5V3a1 1 0 0 1 2 0v5V5a1 1 0 0 1 2 0v6c0 3-2 4-4 4H8c-2 0-3-1-4-3L2 9a1 1 0 0 1 2-1z" fill="#fff" stroke="#000" stroke-width=".8"/>',
   ),
+  text: svg('<path d="M2 2h12v3h-1V3.5H9V13h1.5v1h-5v-1H7V3.5H3V5H2z" fill="#000"/>'),
 };

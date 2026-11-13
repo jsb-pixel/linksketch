@@ -4,7 +4,8 @@ import { parsePlayers } from '../strategy/strategy';
  * The file carries its own surface table so palette reordering never corrupts files.
  */
 import { SURFACES, surfaceCode, type ColorMap, type RGB } from './surfaces';
-import type { CourseDoc, Layer } from './types';
+import type { CourseDoc, Layer, TeeSet, TextLabel, Vec2 } from './types';
+import { MAX_DOC_PIXELS } from './doc';
 import { decodeTerrain, encodeTerrain, type Terrain } from '../terrain/terrain';
 
 export const FILE_EXT = '.fairway';
@@ -65,6 +66,8 @@ export function serialize(doc: CourseDoc): string {
     geo: doc.geo,
     terrain: doc.terrain ? terrainToJson(doc.terrain) : undefined,
     players: doc.players,
+    teeSets: doc.teeSets?.length ? doc.teeSets : undefined,
+    labels: doc.labels?.length ? doc.labels.map((l) => ({ ...l, x: round3(l.x), y: round3(l.y) })) : undefined,
     surfaceTable: SURFACES.map((s) => s.id),
     layers: doc.layers.map((l) => {
       const base = { id: l.id, name: l.name, visible: l.visible, locked: l.locked, kind: l.kind };
@@ -91,6 +94,7 @@ export function serialize(doc: CourseDoc): string {
       ...h,
       points: h.points.map((p) => [round3(p.x), round3(p.y)]),
       targets: h.targets?.some(Boolean) ? h.targets.map((p) => (p ? [round3(p.x), round3(p.y)] : null)) : undefined,
+      tees: h.tees && Object.keys(h.tees).length ? Object.fromEntries(Object.entries(h.tees).map(([id, p]) => [id, [round3(p.x), round3(p.y)]])) : undefined,
     })),
   });
 }
@@ -105,6 +109,8 @@ export function deserialize(text: string): CourseDoc {
   const W = j.width | 0;
   const H = j.height | 0;
   if (W <= 0 || H <= 0) throw new Error('Invalid course size.');
+  // A little headroom over what the app creates, but never an allocation that hangs the tab.
+  if (W * H > MAX_DOC_PIXELS * 1.5) throw new Error('This course file is too large to open.');
   // Map file surface codes → current codes.
   const table: string[] = j.surfaceTable ?? [];
   const remap = new Uint8Array(256);
@@ -154,12 +160,15 @@ export function deserialize(text: string): CourseDoc {
     return {
       ...base,
       kind: 'vector',
-      features: (l.features ?? []).map((f: any) => ({
-        id: String(f.id),
-        surface: String(f.surface),
-        smooth: !!f.smooth,
-        points: (f.points ?? []).map((p: [number, number]) => ({ x: +p[0], y: +p[1] })),
-      })),
+      features: (l.features ?? [])
+        .map((f: any) => ({
+          id: String(f.id),
+          surface: String(f.surface),
+          smooth: !!f.smooth,
+          points: readPoints(f.points),
+        }))
+        // A shape needs three real points; anything less can't be drawn or edited.
+        .filter((f: { points: Vec2[] }) => f.points.length >= 3),
     };
   });
 
@@ -172,6 +181,8 @@ export function deserialize(text: string): CourseDoc {
     colors: parseColors(j.colors),
     terrain: terrainFromJson(j.terrain),
     players: parsePlayers(j.players),
+    teeSets: parseTeeSets(j.teeSets),
+    labels: parseLabels(j.labels),
     geo:
       j.geo && Number.isFinite(+j.geo.lat) && Number.isFinite(+j.geo.lon) && Math.abs(+j.geo.lat) < 85
         ? { lat: +j.geo.lat, lon: +j.geo.lon }
@@ -183,9 +194,8 @@ export function deserialize(text: string): CourseDoc {
             id: String(h.id),
             number: Math.max(1, Math.round(+h.number) || 1),
             par: Math.max(3, Math.min(6, Math.round(+h.par) || 4)),
-            points: (h.points ?? []).map((p: [number, number] | { x: number; y: number }) =>
-              Array.isArray(p) ? { x: +p[0], y: +p[1] } : { x: +p.x, y: +p.y },
-            ),
+            points: readPoints(h.points),
+            ...(readTees(h.tees) ? { tees: readTees(h.tees) } : {}),
             ...(Array.isArray(h.targets)
               ? {
                   targets: h.targets.slice(0, 12).map((p: unknown) =>
@@ -197,6 +207,57 @@ export function deserialize(text: string): CourseDoc {
           .filter((h: { points: unknown[] }) => h.points.length >= 2)
       : [],
   };
+}
+
+/** Points from a file ([x, y] pairs or {x, y}); entries that aren't finite numbers are dropped. */
+function readPoints(v: unknown): Vec2[] {
+  if (!Array.isArray(v)) return [];
+  const out: Vec2[] = [];
+  for (const p of v) {
+    const x = Array.isArray(p) ? +p[0] : +(p as Vec2)?.x;
+    const y = Array.isArray(p) ? +p[1] : +(p as Vec2)?.y;
+    if (Number.isFinite(x) && Number.isFinite(y)) out.push({ x, y });
+  }
+  return out;
+}
+
+function readTees(v: unknown): Record<string, Vec2> | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const out: Record<string, Vec2> = {};
+  for (const [id, p] of Object.entries(v as Record<string, unknown>)) {
+    const [pt] = readPoints([p]);
+    if (pt) out[id] = pt;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+const HEX = /^#[0-9a-f]{6}$/i;
+
+function parseTeeSets(v: unknown): TeeSet[] | undefined {
+  if (!Array.isArray(v) || !v.length) return undefined;
+  const seen = new Set<string>();
+  const out: TeeSet[] = [];
+  for (const t of v.slice(0, 8) as Record<string, unknown>[]) {
+    const id = String(t?.id ?? '');
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name: String(t?.name ?? 'Tees').slice(0, 24) || 'Tees', color: typeof t?.color === 'string' && HEX.test(t.color) ? t.color : '#1565c0' });
+  }
+  return out.length ? out : undefined;
+}
+
+function parseLabels(v: unknown): TextLabel[] | undefined {
+  if (!Array.isArray(v) || !v.length) return undefined;
+  const out: TextLabel[] = [];
+  for (const l of v.slice(0, 500) as Record<string, unknown>[]) {
+    const x = +(l?.x as number);
+    const y = +(l?.y as number);
+    const text = String(l?.text ?? '').slice(0, 120);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !text.trim()) continue;
+    const size = +(l?.size as number);
+    out.push({ id: String(l?.id ?? `T${out.length}`), x, y, text, size: Number.isFinite(size) ? Math.max(2, Math.min(200, size)) : 14 });
+  }
+  return out.length ? out : undefined;
 }
 
 function terrainToJson(t: Terrain) {

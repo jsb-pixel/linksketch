@@ -2,13 +2,10 @@ import { Editor, isTyping, type ToolId } from './editor/editor';
 import { registerAllTools } from './editor/tools';
 import { createDoc, MAX_DOC_PIXELS } from './model/doc';
 import { DETAIL_LEVELS, detailPixels } from './model/detail';
-import { drawShots } from './strategy/draw';
 import { deserialize, FILE_EXT, idbGet, idbSet, serialize } from './model/io';
-import { SURFACES, rgbCss, surfaceById, surfaceColor, surfaceColor2, type ColorMap } from './model/surfaces';
+import { SURFACES, surfaceById, surfaceColor, surfaceColor2, type ColorMap } from './model/surfaces';
 import { createImageLayer } from './model/doc';
-import { drawHoles } from './editor/holes';
 import { loadImageBlob } from './editor/underlay';
-import { drawTerrain } from './terrain/render';
 import { CURSOR_STYLES } from './editor/cursors';
 import { createTerrain } from './terrain/terrain';
 import { MAP_SOURCES } from './editor/maptiles';
@@ -28,10 +25,27 @@ import {
   fromHex,
   h,
   toHex,
+  type Menu,
+  type MenuItem,
 } from './ui/ui';
+import { fitsCanvas } from './editor/viewmath';
+import { APP_VERSION } from './version';
+import { MAX_TEE_SETS, TEE_PRESETS } from './model/tees';
+import { uid } from './model/doc';
+import type { TeeSet } from './model/types';
+import { canvasPng, drawCourse, holePagesPdf, renderHolePage, renderPresentation } from './export/draw';
+import { sheetLayout } from './export/layout';
+import { courseStats, statsCsv } from './model/stats';
+import { formatArea } from './ui/ui';
+
+/** Where feedback goes: the project's public issue tracker. */
+const FEEDBACK_URL = 'https://github.com/jsb-pixel/linksketch/issues/new';
+export const SAMPLE_URL = '/samples/sample-course.fairway';
 
 const AUTOSAVE_KEY = 'autosave';
 const AUTOSAVE_DELAY = 1500;
+/** localStorage key for a course saved while the tab was closing (see flushAutosave). */
+const PENDING_KEY = 'fairway-pending';
 
 // File System Access API (Chrome/Edge). Safari falls back to download/upload.
 interface FileHandle {
@@ -51,6 +65,8 @@ export class App {
   private fileHandle: FileHandle | null = null;
   private autosaveTimer = 0;
   private unsaved = false;
+  /** Has this course been written to (or opened from) a file? */
+  private savedOnce = false;
 
   constructor() {
     this.ed = new Editor(document.querySelector('#view') as HTMLCanvasElement);
@@ -75,29 +91,90 @@ export class App {
     });
     this.ed.on('doc', () => this.updateTitle());
     this.updateTitle();
+    // Don't lose the last second and a half of work when the tab closes.
+    window.addEventListener('pagehide', () => this.flushAutosave());
+    document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && this.flushAutosave());
     void this.restoreAutosave();
   }
 
   // ------------------------------------------------------------ files
   private updateTitle(): void {
     document.title = `${this.unsaved ? '• ' : ''}${this.ed.doc.name} — Linksketch`;
+    const note = document.querySelector('#save-note');
+    if (note) {
+      note.textContent = this.unsaved || !this.savedOnce ? 'Kept in this browser only · File → Save keeps a copy' : 'Saved to a file ✓';
+      note.classList.toggle('saved', !this.unsaved && this.savedOnce);
+    }
   }
 
   private scheduleAutosave(): void {
     window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = window.setTimeout(() => {
+      this.autosaveTimer = 0;
       idbSet(AUTOSAVE_KEY, serialize(this.ed.doc)).catch((err) => console.warn('Autosave failed', err));
     }, AUTOSAVE_DELAY);
   }
 
+  /**
+   * Write the autosave right now (the tab is being hidden or closed). A database write
+   * started while a page is closing is often dropped by the browser, so the course is
+   * also put in localStorage, which is written immediately; it is picked up on the next
+   * start and removed once the database has it.
+   */
+  private flushAutosave(): void {
+    if (!this.autosaveTimer) return;
+    window.clearTimeout(this.autosaveTimer);
+    this.autosaveTimer = 0;
+    const text = serialize(this.ed.doc);
+    try {
+      localStorage.setItem(PENDING_KEY, text);
+    } catch {
+      /* too big for localStorage, or storage is off: the database write below is the only chance */
+    }
+    idbSet(AUTOSAVE_KEY, text)
+      .then(() => localStorage.removeItem(PENDING_KEY))
+      .catch((err) => console.warn('Autosave failed', err));
+  }
+
+  /**
+   * A link like /linksketch/app/?sample=1 opens the sample course — but never over
+   * work in progress without asking first.
+   */
+  private async openSampleFromLink(hadCourse: boolean): Promise<void> {
+    if (new URLSearchParams(location.search).get('sample') !== '1') return;
+    history.replaceState(null, '', location.pathname);
+    if (!hadCourse) return this.openSample();
+    dialog(
+      'Open the sample course?',
+      h('div', { class: 'about' }, h('p', { textContent: `You have a course in progress (“${this.ed.doc.name}”). Opening the sample replaces it in this browser.` }), h('p', { textContent: 'Save it to a file first (File → Save) if you want to keep it.' })),
+      [
+        { label: 'Keep my course', primary: true, onClick: () => {} },
+        { label: 'Open the sample', onClick: () => void this.openSample() },
+      ],
+    );
+  }
+
   private async restoreAutosave(): Promise<void> {
     try {
-      const text = await idbGet<string>(AUTOSAVE_KEY);
-      if (!text) return;
+      // A copy left by a closing tab is newer than whatever reached the database.
+      let pending: string | null = null;
+      try {
+        pending = localStorage.getItem(PENDING_KEY);
+      } catch {
+        /* storage is off */
+      }
+      const text = pending ?? (await idbGet<string>(AUTOSAVE_KEY));
+      if (!text) return void this.openSampleFromLink(false);
       this.ed.setDoc(deserialize(text));
       this.ed.setMessage('Restored your last session (autosaved).');
+      if (pending) {
+        await idbSet(AUTOSAVE_KEY, pending);
+        localStorage.removeItem(PENDING_KEY);
+      }
+      void this.openSampleFromLink(true);
     } catch (err) {
       console.warn('Could not restore autosave', err);
+      void this.openSampleFromLink(false);
     }
   }
 
@@ -143,6 +220,7 @@ export class App {
             return false;
           this.fileHandle = null;
           this.unsaved = false;
+          this.savedOnce = false;
           this.ed.setDoc(createDoc({ name: name.value.trim() || 'Untitled course', widthYards: w, heightYards: hgt, yardsPerPixel: ypp, background: bg.value }));
           this.scheduleAutosave();
         },
@@ -297,6 +375,8 @@ export class App {
     window.addEventListener('fairway:move-shapes', () => this.moveShapesDialog());
     window.addEventListener('fairway:players', () => this.playersDialog());
     window.addEventListener('fairway:place-on-map', () => this.placeOnMapDialog());
+    window.addEventListener('fairway:stats', () => this.statsDialog());
+    window.addEventListener('fairway:storage', () => this.storageDialog());
   }
 
   private loadText(text: string, name: string): void {
@@ -304,6 +384,7 @@ export class App {
     try {
       this.fileHandle = null;
       this.unsaved = false;
+      this.savedOnce = false;
       this.ed.setDoc(deserialize(text));
       this.scheduleAutosave();
       this.ed.setMessage(`Opened ${name}`);
@@ -469,11 +550,12 @@ export class App {
         label: 'OK',
         primary: true,
         onClick: () => {
+          this.ed.history.begin('Course properties');
+          this.ed.history.snapshotMeta();
           this.ed.doc.name = name.value.trim() || this.ed.doc.name;
           this.ed.doc.background = bg.value;
+          this.ed.history.commit();
           this.ed.invalidate();
-          this.unsaved = true;
-          this.scheduleAutosave();
           this.ed.emit('doc');
         },
       },
@@ -499,6 +581,7 @@ export class App {
         download(new Blob([text], { type: 'application/json' }), this.fileName());
       }
       this.unsaved = false;
+      this.savedOnce = true;
       this.updateTitle();
       this.ed.setMessage(`Saved ${this.fileHandle?.name ?? this.fileName()}`);
     } catch (err) {
@@ -520,6 +603,7 @@ export class App {
       const doc = deserialize(await file.text());
       this.fileHandle = handle;
       this.unsaved = false;
+      this.savedOnce = true;
       this.ed.setDoc(doc);
       this.scheduleAutosave();
       this.ed.setMessage(`Opened ${file.name}`);
@@ -530,44 +614,23 @@ export class App {
 
   exportPng(scale: number): void {
     const ed = this.ed;
-    ed.flushRender();
+    if (!fitsCanvas(ed.doc.width * scale, ed.doc.height * scale)) {
+      alert(`A ${scale}× picture of this course would be ${ed.doc.width * scale} × ${ed.doc.height * scale} pixels — too large for the browser. Pick a smaller scale.`);
+      return;
+    }
     const c = document.createElement('canvas');
     c.width = ed.doc.width * scale;
     c.height = ed.doc.height * scale;
-    const ctx = c.getContext('2d')!;
-    ctx.fillStyle = rgbCss(surfaceColor(ed.doc.background));
-    ctx.fillRect(0, 0, c.width, c.height);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(ed.docCanvas, 0, 0, c.width, c.height);
-    const tl = ed.terrainLayer();
-    if (tl?.visible && ed.doc.terrain) {
-      ctx.save();
-      ctx.scale(scale, scale);
-      drawTerrain(ctx, ed.doc.terrain, tl, ed.doc.yardsPerPixel, 1 / scale);
-      ctx.restore();
-    }
-    // Underlays are reference material and are never exported. Holes are, if shown.
-    if (ed.showHoles && ed.doc.holes.length) {
-      const k = scale / ed.doc.yardsPerPixel;
-      drawHoles(ctx, ed.doc.holes, {
-        toScreen: (w) => ({ x: w.x * k, y: w.y * k }),
-        unitsPerYard: k,
-        uiScale: Math.max(1, scale / 1.5),
-        elevation: ed.doc.terrain ? (w) => ed.elevationAt(w) : undefined,
-      });
-    }
-    const hole = ed.selectedHole();
-    if (ed.showHoles && ed.showStrategy && hole) {
-      const k = scale / ed.doc.yardsPerPixel;
-      const placed: { x: number; y: number; w: number; h: number }[] = [];
-      for (const r of ed.strategyFor(hole))
-        drawShots(ctx, r.player, r.shots, r.odds, { toScreen: (w) => ({ x: w.x * k, y: w.y * k }), unitsPerYard: k, uiScale: Math.max(1, scale / 1.5), placed });
-    }
-    c.toBlob((b) => b && download(b, this.fileName().replace(FILE_EXT, scale > 1 ? `@${scale}x.png` : '.png')), 'image/png');
+    drawCourse(c.getContext('2d')!, ed, scale);
+    c.toBlob((b) => {
+      // Safari silently gives nothing back when the canvas is over its size limit.
+      if (!b) return alert('This browser could not make a picture that large. Try a smaller scale (Export PNG 1× or 2×).');
+      download(b, this.fileName().replace(FILE_EXT, scale > 1 ? `@${scale}x.png` : '.png'));
+    }, 'image/png');
   }
 
   // ------------------------------------------------------------ menus & keys
-  private menus() {
+  private menus(): Menu[] {
     const ed = this.ed;
     return [
       {
@@ -575,6 +638,7 @@ export class App {
         items: [
           { label: 'New course…', action: () => this.newCourseDialog() },
           { label: 'Open…', shortcut: '⌘O', action: () => void this.open() },
+          { label: 'Open sample course', action: () => void this.openSample() },
           { separator: true, label: '' },
           { label: 'Save', shortcut: '⌘S', action: () => void this.save() },
           { label: 'Save as…', shortcut: '⇧⌘S', action: () => void this.save(true) },
@@ -584,6 +648,8 @@ export class App {
           { label: 'Export PNG (1×)', action: () => this.exportPng(1) },
           { label: 'Export PNG (2×)', action: () => this.exportPng(2) },
           { label: 'Export PNG (4×)', action: () => this.exportPng(4) },
+          { label: 'Export presentation sheet (PNG)', action: () => void this.exportPresentation() },
+          { label: 'Course stats…', action: () => this.statsDialog() },
           { separator: true, label: '' },
           { label: 'Course properties…', action: () => this.courseProperties() },
           { label: 'Course size…', action: () => this.courseSizeDialog() },
@@ -708,24 +774,43 @@ export class App {
         ],
       },
       {
+        title: 'Holes',
+        items: () => [
+          { label: 'Draw a hole', shortcut: 'O', action: () => ed.setTool('hole') },
+          { label: 'Tee sets…', action: () => this.teeSetsDialog() },
+          { separator: true, label: '' },
+          { label: 'Export hole page (PNG)', enabled: () => !!ed.selectedHole(), action: () => void this.exportHolePage() },
+          { label: 'Export all hole pages (PDF)', enabled: () => ed.doc.holes.length > 0, action: () => void this.exportHoleBook() },
+          ...(ed.teeSets.length > 1
+            ? [
+                { separator: true, label: '' },
+                ...ed.teeSets.map((t) => ({ label: `Play from: ${t.name}`, checked: () => ed.activeTeeSetId === t.id, action: () => ed.setTeeSet(t.id) })),
+              ]
+            : []),
+        ] as MenuItem[],
+      },
+      {
         title: 'Strategy',
-        items: [
+        // Built each time the menu opens, so renamed players show up.
+        items: () => [
           { label: 'Show landing patterns', shortcut: 'S', checked: () => ed.showStrategy, action: () => this.toggleStrategy() },
           { separator: true, label: '' },
           ...ed.players.map((p) => ({
             label: p.name,
-            checked: () => ed.strategyPlayer === p.id,
+            checked: () => ed.activeStrategyPlayer === p.id,
             action: () => ed.setStrategy({ player: p.id, show: true }),
           })),
           { label: 'All players', checked: () => ed.strategyPlayer === 'all', action: () => ed.setStrategy({ player: 'all', show: true }) },
           { separator: true, label: '' },
           { label: 'Players (distance & accuracy)…', action: () => this.playersDialog() },
-        ],
+        ] as MenuItem[],
       },
       {
         title: 'View',
         items: [
           { label: 'Show holes', checked: () => ed.showHoles, action: () => ed.setHoleView({ showHoles: !ed.showHoles }) },
+          { label: 'Show text labels', checked: () => ed.showLabels, action: () => ed.setShowLabels(!ed.showLabels) },
+          { label: 'Crisp shapes when zoomed in', checked: () => ed.crispShapes, action: () => ed.setCrispShapes(!ed.crispShapes) },
           {
             label: '    Distance arcs from tee',
             checked: () => ed.arcsFromTee,
@@ -778,10 +863,122 @@ export class App {
         title: 'Help',
         items: [
           { label: 'Keyboard shortcuts', action: () => this.shortcutsDialog() },
+          { label: 'Where is my work saved?', action: () => this.storageDialog() },
+          { label: 'Send feedback…', action: () => this.feedback() },
+          { separator: true, label: '' },
           { label: 'About Linksketch', action: () => this.aboutDialog() },
         ],
       },
     ];
+  }
+
+  // ------------------------------------------------------------ exports, stats, help
+  async openSample(): Promise<void> {
+    try {
+      const res = await fetch(SAMPLE_URL);
+      if (!res.ok) throw new Error(`the sample answered ${res.status}`);
+      this.loadText(await res.text(), 'the sample course');
+    } catch (err) {
+      alert(`Could not load the sample course: ${(err as Error).message}`);
+    }
+  }
+
+  private baseName(): string {
+    return this.fileName().replace(FILE_EXT, '');
+  }
+
+  async exportPresentation(): Promise<void> {
+    const ed = this.ed;
+    // 2× looks best; fall back to 1× for very large courses.
+    const scale = [2, 1].find((k) => {
+      const l = sheetLayout(ed.doc.width * k, ed.doc.height * k, 18);
+      return fitsCanvas(l.width, l.height);
+    });
+    if (!scale) return alert('This course is too large to put on one sheet. Make the course area smaller first.');
+    try {
+      download(await canvasPng(renderPresentation(ed, scale)), `${this.baseName()} - presentation.png`);
+      ed.setMessage('Presentation sheet exported: title, legend of the surfaces used, scale bar and north arrow.');
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  async exportHolePage(): Promise<void> {
+    const hole = this.ed.selectedHole();
+    if (!hole) return this.ed.setMessage('Select a hole first (Hole tool or the Scorecard).');
+    try {
+      download(await canvasPng(renderHolePage(this.ed, hole)), `${this.baseName()} - hole ${hole.number}.png`);
+      this.ed.setMessage(`Hole ${hole.number} exported as a yardage‑book page.`);
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  async exportHoleBook(): Promise<void> {
+    const n = this.ed.doc.holes.length;
+    if (!n) return this.ed.setMessage('Draw a hole first with the Hole tool (O).');
+    this.ed.setMessage(`Making ${n} hole page${n > 1 ? 's' : ''}…`);
+    try {
+      download(await holePagesPdf(this.ed), `${this.baseName()} - yardage book.pdf`);
+      this.ed.setMessage(`Yardage book exported: ${n} page${n > 1 ? 's' : ''}, one per hole.`);
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  /** Acres per surface, greens, bunkers and yardage, with a CSV export. */
+  statsDialog(): void {
+    const ed = this.ed;
+    const s = courseStats(ed.doc);
+    const kv = (k: string, v: string) => h('tr', {}, h('td', { textContent: k }), h('td', { textContent: v }));
+    const table = h('table', { class: 'stats-table' });
+    table.append(
+      kv('Holes', s.holes ? `${s.holes} · par ${s.par}` : 'none yet'),
+      ...s.yardage.filter(() => s.holes > 0).map((y) => kv(s.yardage.length > 1 || ed.doc.teeSets?.length ? `${y.name} tees` : 'Total yardage', `${y.yards.toLocaleString()} yd`)),
+      kv('Course area', `${s.propertyAcres.toFixed(1)} acres`),
+      kv('Painted or drawn', `${s.paintedAcres.toFixed(1)} acres`),
+      kv('Greens', s.greenCount ? `${s.greenCount} · ${Math.round(s.greensSqFt).toLocaleString()} sq ft (average ${Math.round(s.avgGreenSqFt).toLocaleString()})` : 'none'),
+      kv('Bunkers', s.bunkerCount ? `${s.bunkerCount} · ${Math.round(s.bunkerSqFt).toLocaleString()} sq ft of sand` : 'none'),
+    );
+    const surf = h('table', { class: 'stats-table' });
+    surf.append(h('tr', {}, h('th', { textContent: 'Surface' }), h('th', { textContent: 'Area' })));
+    for (const x of s.surfaces) surf.append(kv(x.name, x.acres >= 0.1 ? `${x.acres.toFixed(2)} acres` : formatArea(x.sqYd)));
+    if (!s.surfaces.length) surf.append(kv('Nothing painted yet', ''));
+    const body = h('div', { class: 'form' }, table, surf, h('p', { class: 'tip', textContent: 'Counted from everything visible, exactly as drawn. Hidden layers are left out.' }));
+    dialog('Course stats', body, [
+      {
+        label: 'Export CSV',
+        onClick: () => {
+          download(new Blob([statsCsv(ed.doc.name, s)], { type: 'text/csv' }), `${this.baseName()} - stats.csv`);
+          return false;
+        },
+      },
+      { label: 'Close', primary: true, onClick: () => {} },
+    ]);
+  }
+
+  private storageDialog(): void {
+    dialog(
+      'Where is my work saved?',
+      h(
+        'div',
+        { class: 'about' },
+        h('p', { textContent: 'Linksketch keeps your current course in this browser on this computer, and brings it back when you return. Nothing is uploaded anywhere.' }),
+        h('p', { textContent: 'That copy can disappear if you clear your browsing data, use a private window, or switch browsers or computers.' }),
+        h('p', { textContent: 'To keep a course safely, use File → Save. It writes a .fairway file you can back up, move or email like any other file.' }),
+      ),
+      [{ label: 'OK', primary: true, onClick: () => {} }],
+    );
+  }
+
+  private feedback(): void {
+    const body = `What happened, or what would you like?
+
+
+---
+Linksketch v${APP_VERSION}`;
+    window.open(`${FEEDBACK_URL}?title=${encodeURIComponent('Feedback: ')}&body=${encodeURIComponent(body)}`, '_blank', 'noopener');
+    this.ed.setMessage('Opened the feedback page (GitHub) in a new tab.');
   }
 
   private toggleStrategy(): void {
@@ -847,6 +1044,62 @@ export class App {
       },
       { label: 'Cancel', onClick: () => {} },
       { label: 'OK', primary: true, onClick: () => ed.setPlayers(rows) },
+    ]);
+  }
+
+  /** Name, color and order the course's tee sets. */
+  teeSetsDialog(): void {
+    const ed = this.ed;
+    let rows: TeeSet[] = (ed.doc.teeSets ?? []).map((t) => ({ ...t }));
+    const table = h('table', { class: 'tee-sets-table' });
+    const add = h('button', { class: 'small', textContent: '+ Add tee set', type: 'button' });
+    const draw = () => {
+      table.replaceChildren(
+        ...rows.map((t, i) => {
+          const color = h('input', { type: 'color', value: t.color, title: 'Marker color' }) as HTMLInputElement;
+          color.setAttribute('aria-label', `Color of tee set ${i + 1}`);
+          color.addEventListener('input', () => (t.color = color.value));
+          const name = h('input', { value: t.name, maxLength: 24 }) as HTMLInputElement;
+          name.setAttribute('aria-label', `Name of tee set ${i + 1}`);
+          name.addEventListener('input', () => (t.name = name.value.trim().slice(0, 24) || t.name));
+          const up = h('button', { class: 'small', textContent: '▲', title: 'Move up (longer tees go first)', type: 'button' });
+          up.disabled = i === 0;
+          up.addEventListener('click', () => {
+            [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]];
+            draw();
+          });
+          const rm = h('button', { class: 'small', textContent: '✕', title: 'Remove this tee set', type: 'button' });
+          rm.setAttribute('aria-label', `Remove ${t.name}`);
+          rm.addEventListener('click', () => {
+            rows = rows.filter((x) => x !== t);
+            draw();
+          });
+          return h('tr', {}, h('td', {}, color), h('td', {}, name), h('td', {}, up), h('td', {}, rm));
+        }),
+      );
+      add.disabled = rows.length >= MAX_TEE_SETS;
+    };
+    add.addEventListener('click', () => {
+      const preset = TEE_PRESETS.find((p) => !rows.some((r) => r.name === p.name)) ?? { name: `Tees ${rows.length + 1}`, color: '#555555' };
+      rows.push({ id: uid('T'), ...preset });
+      draw();
+      (table.querySelector('tr:last-child input:not([type=color])') as HTMLInputElement | null)?.select();
+    });
+    draw();
+    const body = h(
+      'div',
+      { class: 'form' },
+      table,
+      add,
+      h('p', {
+        class: 'tip',
+        textContent:
+          'List the longest tees first. The first set plays each hole from the start of its line; for the others, select a hole and use Place in the Info panel to put their tee down. Each set gets its own column on the scorecard.',
+      }),
+    );
+    dialog('Tee sets', body, [
+      { label: 'Cancel', onClick: () => {} },
+      { label: 'OK', primary: true, onClick: () => ed.setTeeSets(rows) },
     ]);
   }
 
@@ -973,6 +1226,7 @@ export class App {
       ['⌘0 / ⌘1', 'Fit / Actual pixels'],
       ['⌘V', 'Paste a screenshot as an underlay'],
       ['3 / 4 / 5 / 6', 'Set par of the selected hole (Hole tool)'],
+      ['A', 'Text label: click to add, drag to move, double‑click to edit'],
     ];
     const table = h('table', { class: 'shortcuts' });
     for (const [k, v] of rows) table.append(h('tr', {}, h('td', {}, h('kbd', { textContent: k })), h('td', { textContent: v })));
@@ -985,7 +1239,7 @@ export class App {
       h(
         'div',
         { class: 'about' },
-        h('p', { textContent: 'Linksketch v0.4 — a pixel‑art golf course design tool.' }),
+        h('p', { textContent: `Linksketch v${APP_VERSION} — a pixel‑art golf course design tool.` }),
         h('p', { textContent: 'Every pixel has a real size, so shapes, areas and measurements are in yards.' }),
         h('p', { textContent: 'Your work autosaves in this browser. Use File → Save to keep a .fairway file.' }),
       ),

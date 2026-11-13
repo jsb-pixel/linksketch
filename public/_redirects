@@ -1,0 +1,4 @@
+/app                  /linksketch/app/   301
+/app/*                /linksketch/app/   301
+/editor               /linksketch/app/   301
+/linksketch/editor    /linksketch/app/   301

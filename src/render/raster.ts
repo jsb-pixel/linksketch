@@ -187,11 +187,13 @@ function composite(
  * The surface code visible at every doc pixel (all visible layers + background).
  * Used by Fill so it respects everything on screen, like Paint.
  */
-export function visibleCodes(doc: CourseDoc): Uint8Array {
+export function visibleCodes(doc: CourseDoc, withBackground = true): Uint8Array {
   const W = doc.width;
   const H = doc.height;
   const full = { x: 0, y: 0, w: W, h: H };
-  const map = new Uint8Array(W * H).fill(surfaceCode(doc.background) || surfaceCode('white'));
+  // Without the background, unpainted pixels stay 0 (for stats and legends).
+  const map = new Uint8Array(W * H);
+  if (withBackground) map.fill(surfaceCode(doc.background) || surfaceCode('white'));
   for (const layer of doc.layers) {
     if (!layer.visible || (layer.kind !== 'raster' && layer.kind !== 'vector')) continue;
     const codes = layer.kind === 'raster' ? layer.pixels : rasterizeVectorLayer(layer, full, doc.yardsPerPixel);

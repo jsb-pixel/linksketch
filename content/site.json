@@ -1,0 +1,45 @@
+{
+  "_readme": "Facts about you and your site. Anything starting with TODO(owner) is a placeholder shown highlighted on the site until you replace it.",
+  "url": "TODO(owner): https://your-domain.example",
+  "owner": {
+    "name": "TODO(owner): Your Name",
+    "heroLines": ["Your", "Name", "Here"],
+    "role": "Golf course designer & toolmaker",
+    "location": "TODO(owner): where you live",
+    "contact": "TODO(owner): how people should reach you (an email address or a link)",
+    "github": "jsb-pixel"
+  },
+  "license": "TODO(owner): choose a license for the site's words and for the Linksketch code (for example: text CC BY 4.0, code MIT)",
+  "projects": [
+    {
+      "id": "linksketch",
+      "name": "Linksketch",
+      "pitch": "Paint a golf course. It knows what a fairway is.",
+      "type": "Web app",
+      "status": "beta",
+      "image": "/shots/course.webp",
+      "link": "/linksketch/",
+      "summary": "A Paint-simple pixel-art tool for designing golf courses, with real yardages, terrain and shot strategy."
+    },
+    {
+      "id": "todo-project-2",
+      "name": "TODO(owner): another project",
+      "pitch": "TODO(owner): one evocative line about it",
+      "type": "TODO(owner): type",
+      "status": "in development",
+      "image": "",
+      "link": "",
+      "summary": "TODO(owner): a sentence on what it is and where it stands."
+    },
+    {
+      "id": "todo-project-3",
+      "name": "TODO(owner): a third project",
+      "pitch": "TODO(owner): one evocative line about it",
+      "type": "TODO(owner): type",
+      "status": "in development",
+      "image": "",
+      "link": "",
+      "summary": "TODO(owner): a sentence on what it is and where it stands."
+    }
+  ]
+}

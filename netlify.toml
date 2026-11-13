@@ -1,0 +1,56 @@
+# Netlify build settings. The site is plain static files, so it also runs on
+# Cloudflare Pages (same build command and folder; public/_redirects and
+# public/_headers carry the same rules there).
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# The editor used to be the whole site, at "/". The home page now lives there, so "/"
+# can't redirect — the home page links to the editor prominently instead (and tells
+# returning visitors their course is still saved). These catch the obvious guesses.
+[[redirects]]
+  from = "/app"
+  to = "/linksketch/app/"
+  status = 301
+
+[[redirects]]
+  from = "/app/*"
+  to = "/linksketch/app/"
+  status = 301
+
+[[redirects]]
+  from = "/editor"
+  to = "/linksketch/app/"
+  status = 301
+
+[[redirects]]
+  from = "/linksketch/editor"
+  to = "/linksketch/app/"
+  status = 301
+
+# Files with a fingerprint in their name never change, so browsers may keep them forever.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/fonts/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# The service worker must always be fresh, or updates never arrive.
+[[headers]]
+  for = "/linksketch/app/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"

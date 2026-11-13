@@ -78,12 +78,13 @@ export interface Shot {
   custom: boolean;
 }
 
-export function planShots(hole: Hole, p: PlayerProfile): Shot[] {
+/** `tee` overrides where the first shot is played from (another tee set). */
+export function planShots(hole: Hole, p: PlayerProfile, tee?: Vec2): Shot[] {
   const out: Shot[] = [];
   const pts = hole.points;
   if (pts.length < 2) return out;
   const green = pts[pts.length - 1];
-  let from = pts[0];
+  let from = tee ?? pts[0];
   const add = (planned: Vec2, toGreen: boolean, extra: boolean): boolean => {
     const custom = hole.targets?.[out.length] ?? null;
     const target = custom ?? planned;
@@ -117,6 +118,37 @@ export function planShots(hole: Hole, p: PlayerProfile): Shot[] {
   // Can't get there in the planned shots: keep going straight at the green.
   for (let n = 0; n < 4 && out.length && out[out.length - 1].short > 1; n++) add(green, true, true);
   return out;
+}
+
+/**
+ * Cache key for a shot's landing odds: everything `samplePoint` reads. (Tilt matters —
+ * a left‑hander's pattern is the mirror image with the same centre and spreads.)
+ */
+export function shotKey(s: Shot): string {
+  return [s.center.x.toFixed(2), s.center.y.toFixed(2), s.dir.x.toFixed(4), s.dir.y.toFixed(4), s.sigmaSide.toFixed(2), s.sigmaDepth.toFixed(2), s.tilt.toFixed(4)].join(',');
+}
+
+/**
+ * Shot targets are stored by shot number (shot k is played to point k+1), so they
+ * must follow when a point is added to or taken out of the line of play.
+ */
+export function targetsAfterPointRemoved(targets: (Vec2 | null)[] | undefined, pointIndex: number): (Vec2 | null)[] | undefined {
+  if (!targets) return undefined;
+  const out = targets.slice();
+  out.splice(Math.max(0, pointIndex - 1), 1);
+  return trimTargets(out);
+}
+export function targetsAfterPointInserted(targets: (Vec2 | null)[] | undefined, pointIndex: number): (Vec2 | null)[] | undefined {
+  if (!targets) return undefined;
+  const out = targets.slice();
+  const at = Math.max(0, pointIndex - 1);
+  while (out.length < at) out.push(null);
+  out.splice(at, 0, null);
+  return trimTargets(out);
+}
+function trimTargets(out: (Vec2 | null)[]): (Vec2 | null)[] | undefined {
+  while (out.length && !out[out.length - 1]) out.pop();
+  return out.length ? out : undefined;
 }
 
 // ---------------------------------------------------------------- outcomes

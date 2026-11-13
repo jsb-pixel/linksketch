@@ -1,6 +1,7 @@
 /** Satellite map tiles (Web Mercator XYZ) drawn under the course. */
 import { R, mercToWorld, mercPerYard, worldToMerc, type GeoRef } from '../geo/geo';
 import type { MapSource, Vec2 } from '../model/types';
+import { tileRetryDue } from './viewmath';
 
 export interface SourceInfo {
   id: MapSource;
@@ -33,21 +34,23 @@ export const MAP_SOURCES: Record<MapSource, SourceInfo> = {
 
 const WORLD = 2 * Math.PI * R;
 const CACHE_MAX = 400;
-const cache = new Map<string, HTMLImageElement | 'error'>();
+/** A failed tile remembers when it failed, so it is tried again later (e.g. back online). */
+const cache = new Map<string, HTMLImageElement | { failedAt: number }>();
+const failed = (v: HTMLImageElement | { failedAt: number }): v is { failedAt: number } => 'failedAt' in v;
 
 function tile(src: SourceInfo, z: number, x: number, y: number, onLoad: () => void): HTMLImageElement | null {
   const key = `${src.id}/${z}/${x}/${y}`;
   const hit = cache.get(key);
-  if (hit) {
+  if (hit && !(failed(hit) && tileRetryDue(hit.failedAt, performance.now()))) {
     // refresh LRU order
     cache.delete(key);
     cache.set(key, hit);
-    return hit === 'error' || !hit.complete || !hit.naturalWidth ? null : hit;
+    return failed(hit) || !hit.complete || !hit.naturalWidth ? null : hit;
   }
   const img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = onLoad;
-  img.onerror = () => cache.set(key, 'error');
+  img.onerror = () => cache.set(key, { failedAt: performance.now() });
   img.src = src.url(z, x, y);
   cache.set(key, img);
   while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value!);
@@ -57,7 +60,7 @@ function tile(src: SourceInfo, z: number, x: number, y: number, onLoad: () => vo
 /** Cached tile only (no network) — for drawing a blurry placeholder while loading. */
 function cachedTile(src: SourceInfo, z: number, x: number, y: number): HTMLImageElement | null {
   const hit = cache.get(`${src.id}/${z}/${x}/${y}`);
-  return hit && hit !== 'error' && hit.complete && hit.naturalWidth ? hit : null;
+  return hit && !failed(hit) && hit.complete && hit.naturalWidth ? hit : null;
 }
 
 export interface MapDrawOptions {

@@ -1,5 +1,5 @@
 import type { PlayerProfile } from '../strategy/strategy';
-import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, MapLayer, RasterLayer, Rect, VectorLayer } from './types';
+import type { CourseDoc, Feature, Hole, ImageLayer, ImagePlacement, Layer, MapLayer, RasterLayer, Rect, TeeSet, TextLabel, VectorLayer } from './types';
 import type { GeoRef } from '../geo/geo';
 import { touch, type Terrain } from '../terrain/terrain';
 import { rectUnion } from '../geom/geom';
@@ -74,6 +74,31 @@ const placementOf = (l: ImageLayer): ImagePlacement => ({
 const samePlacement = (a: ImagePlacement, b: ImagePlacement) =>
   (Object.keys(a) as (keyof ImagePlacement)[]).every((k) => a[k] === b[k]);
 
+/** Course name/background and per-layer name + outline switch. */
+interface MetaState {
+  name: string;
+  background: string;
+  layers: Map<Layer, { name: string; outline?: boolean }>;
+}
+function captureMeta(doc: CourseDoc): MetaState {
+  const layers: MetaState['layers'] = new Map();
+  for (const l of doc.layers) layers.set(l, l.kind === 'raster' ? { name: l.name, outline: l.outline } : { name: l.name });
+  return { name: doc.name, background: doc.background, layers };
+}
+function restoreMeta(doc: CourseDoc, m: MetaState): void {
+  doc.name = m.name;
+  doc.background = m.background;
+  for (const [l, v] of m.layers) Object.assign(l, v);
+}
+function sameMeta(a: MetaState, b: MetaState): boolean {
+  if (a.name !== b.name || a.background !== b.background) return false;
+  for (const [l, v] of b.layers) {
+    const o = a.layers.get(l);
+    if (o && (o.name !== v.name || o.outline !== v.outline)) return false;
+  }
+  return true;
+}
+
 interface VectorChange {
   layer: VectorLayer;
   before: Feature[];
@@ -98,6 +123,11 @@ interface Entry {
   maps: { layer: MapLayer; before: MapProps; after: MapProps }[];
   docState?: { before: DocState; after: DocState };
   images: { layer: ImageLayer; before: ImagePlacement; after: ImagePlacement }[];
+  meta?: { before: MetaState; after: MetaState };
+  tees?: { before: TeeSet[] | undefined; after: TeeSet[] | undefined };
+  labels?: { before: TextLabel[] | undefined; after: TextLabel[] | undefined };
+  /** Rough memory held by this entry, for the history budget. */
+  bytes: number;
 }
 
 interface Pending {
@@ -113,6 +143,9 @@ interface Pending {
   maps: Map<MapLayer, MapProps>;
   docState?: DocState;
   images: Map<ImageLayer, ImagePlacement>;
+  meta?: MetaState;
+  tees?: { value: TeeSet[] | undefined };
+  labels?: { value: TextLabel[] | undefined };
 }
 
 const cloneFeatures = (fs: Feature[]): Feature[] => fs.map((f) => ({ ...f }));
@@ -138,7 +171,25 @@ export class History {
   /** Called after commit/undo/redo. */
   onChange: () => void = () => {};
 
-  constructor(private doc: CourseDoc, private limit = 200) {}
+  /**
+   * `limit` caps the number of steps; `byteBudget` caps the memory they hold (big fills
+   * and resizes keep whole copies of paint layers). The newest step is always kept.
+   */
+  constructor(private doc: CourseDoc, private limit = 200, private byteBudget = 256 * 1024 * 1024) {}
+
+  /** Approximate memory held by the undo and redo stacks. */
+  get bytes(): number {
+    let n = 0;
+    for (const e of this.undoStack) n += e.bytes;
+    for (const e of this.redoStack) n += e.bytes;
+    return n;
+  }
+
+  private trim(): void {
+    while (this.undoStack.length > this.limit) this.undoStack.shift();
+    let total = this.bytes;
+    while (this.undoStack.length > 1 && total > this.byteBudget) total -= this.undoStack.shift()!.bytes;
+  }
 
   get canUndo(): boolean {
     return this.undoStack.length > 0;
@@ -218,6 +269,22 @@ export class History {
     if (!p.images.has(layer)) p.images.set(layer, placementOf(layer));
   }
 
+  /** Course name, background, layer names and outline switches. */
+  snapshotMeta(): void {
+    const p = this.need();
+    if (!p.meta) p.meta = captureMeta(this.doc);
+  }
+
+  snapshotTeeSets(): void {
+    const p = this.need();
+    if (!p.tees) p.tees = { value: this.doc.teeSets && this.doc.teeSets.map((t) => ({ ...t })) };
+  }
+
+  snapshotLabels(): void {
+    const p = this.need();
+    if (!p.labels) p.labels = { value: this.doc.labels && this.doc.labels.map((t) => ({ ...t })) };
+  }
+
   snapshotLayers(): void {
     const p = this.need();
     if (!p.layers) p.layers = this.doc.layers.slice();
@@ -228,7 +295,7 @@ export class History {
     const p = this.pending;
     if (!p) return false;
     this.pending = null;
-    const entry: Entry = { label: p.label, vector: [], raster: [], images: [], maps: [] };
+    const entry: Entry = { label: p.label, vector: [], raster: [], images: [], maps: [], bytes: 0 };
     for (const [layer, before] of p.vector) {
       const changed =
         before.length !== layer.features.length ||
@@ -262,7 +329,7 @@ export class History {
         p.holes.length !== now.length ||
         p.holes.some((h, i) => {
           const g = now[i];
-          return h.id !== g.id || h.points !== g.points || h.par !== g.par || h.number !== g.number;
+          return h.id !== g.id || h.points !== g.points || h.par !== g.par || h.number !== g.number || h.targets !== g.targets || h.tees !== g.tees;
         });
       if (changed) entry.holes = { before: p.holes, after: cloneHoles(now) };
     }
@@ -290,10 +357,19 @@ export class History {
     }
     if (p.players && JSON.stringify(p.players.value) !== JSON.stringify(this.doc.players))
       entry.players = { before: p.players.value, after: clonePlayers(this.doc.players) };
-    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors && !entry.players && !entry.holes && !entry.images.length && !entry.geo && !entry.maps.length && !entry.docState && !entry.terrain)
+    if (p.meta) {
+      const after = captureMeta(this.doc);
+      if (!sameMeta(p.meta, after)) entry.meta = { before: p.meta, after };
+    }
+    if (p.tees && JSON.stringify(p.tees.value) !== JSON.stringify(this.doc.teeSets))
+      entry.tees = { before: p.tees.value, after: this.doc.teeSets && this.doc.teeSets.map((t) => ({ ...t })) };
+    if (p.labels && JSON.stringify(p.labels.value) !== JSON.stringify(this.doc.labels))
+      entry.labels = { before: p.labels.value, after: this.doc.labels && this.doc.labels.map((t) => ({ ...t })) };
+    if (!entry.vector.length && !entry.raster.length && !entry.layers && !entry.colors && !entry.players && !entry.holes && !entry.images.length && !entry.geo && !entry.maps.length && !entry.docState && !entry.terrain && !entry.meta && !entry.tees && !entry.labels)
       return false;
+    entry.bytes = entryBytes(entry);
     this.undoStack.push(entry);
-    if (this.undoStack.length > this.limit) this.undoStack.shift();
+    this.trim();
     this.redoStack.length = 0;
     this.onChange();
     return true;
@@ -315,6 +391,9 @@ export class History {
     if (p.geo) this.doc.geo = p.geo.value;
     if (p.docState) restoreDoc(this.doc, p.docState);
     if (p.terrain) restoreTerrain(this.doc, p.terrain);
+    if (p.meta) restoreMeta(this.doc, p.meta);
+    if (p.tees) this.doc.teeSets = p.tees.value;
+    if (p.labels) this.doc.labels = p.labels.value;
   }
 
   undo(): boolean {
@@ -342,7 +421,16 @@ export class History {
     this.pending = null;
   }
 
+  /**
+   * Doc pixels touched by the last undo/redo when it only changed paint (the usual
+   * case for brush work), so the view can re-render just that; null = everything.
+   */
+  lastRect: Rect | null = null;
+
   private apply(e: Entry, side: 'before' | 'after'): void {
+    const paintOnly =
+      e.raster.length > 0 && !e.vector.length && !e.layers && !e.colors && !e.docState && !e.meta && !e.terrain && !e.images.length && !e.maps.length;
+    this.lastRect = paintOnly ? e.raster.reduce<Rect | null>((r, c) => rectUnion(r, c.rect), null) : null;
     if (e.docState) restoreDoc(this.doc, e.docState[side]);
     if (e.terrain) restoreTerrain(this.doc, e.terrain[side]);
     if (e.layers) this.doc.layers = e.layers[side].slice();
@@ -354,10 +442,28 @@ export class History {
     if (e.geo) this.doc.geo = e.geo[side] && { ...e.geo[side]! };
     for (const v of e.vector) v.layer.features = cloneFeatures(v[side]);
     for (const r of e.raster) writeRect(r.layer.pixels, this.doc.width, r.rect, r[side]);
+    if (e.meta) restoreMeta(this.doc, e.meta[side]);
+    if (e.tees) this.doc.teeSets = e.tees[side] && e.tees[side]!.map((t) => ({ ...t }));
+    if (e.labels) this.doc.labels = e.labels[side] && e.labels[side]!.map((t) => ({ ...t }));
   }
 
   private need(): Pending {
     if (!this.pending) throw new Error('History: no transaction in progress');
     return this.pending;
   }
+}
+
+/** Rough bytes an entry keeps alive (typed arrays dominate; everything else is small). */
+function entryBytes(e: Entry): number {
+  let n = 512;
+  for (const r of e.raster) n += r.before.length + r.after.length;
+  for (const v of e.vector) n += (v.before.length + v.after.length) * 64;
+  if (e.terrain) n += ((e.terrain.before.heights?.length ?? 0) + (e.terrain.after.heights?.length ?? 0)) * 4;
+  if (e.docState) {
+    for (const s of [e.docState.before, e.docState.after]) {
+      for (const p of s.parts.values()) n += p.pixels?.length ?? 0;
+      n += (s.terrain?.heights.length ?? 0) * 4;
+    }
+  }
+  return n;
 }

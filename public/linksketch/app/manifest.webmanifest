@@ -1,0 +1,17 @@
+{
+  "name": "Linksketch",
+  "short_name": "Linksketch",
+  "description": "A Paint-simple pixel-art tool for designing golf courses, with real yardages, terrain and strategy.",
+  "start_url": "/linksketch/app/",
+  "scope": "/linksketch/app/",
+  "display": "standalone",
+  "background_color": "#c0c0c0",
+  "theme_color": "#000080",
+  "categories": ["graphics", "sports", "productivity"],
+  "icons": [
+    { "src": "/icons/linksketch-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/linksketch-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/linksketch-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/linksketch.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

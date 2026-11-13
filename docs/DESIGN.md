@@ -195,9 +195,28 @@ Active surface is shown like Paint's fg/bg swatch.
   menu picks player or All; Info panel shows per‑shot bars; included in PNG export.
   Room for later: wind, slope/roll, club selection, lie penalties, expected strokes.
   (Do not use the "DECADE" trademark.)
-- **v0.6** — multiple tee sets + hole pages (yardage‑book export).
-- **v0.7** — course stats + presentation export (legend, scale bar, north arrow, labels).
-- **Later** — crisp shapes option, PWA / Tauri desktop, iPad + Pencil, share links.
+- **v0.6 Tee sets & hole pages** ✅ built 2026‑11‑12 (`model/tees.ts`, `export/`). Tee sets are
+  named and colored per course (Holes → Tee sets…). The first set tees off from the start of
+  each hole's line; other sets store one tee point per hole (`hole.tees[setId]`) and share
+  the rest of the line. One scorecard column per set; click a column to "play from" it
+  (yardage labels and strategy follow). Hole pages: one hole as a yardage‑book page (tee at
+  the bottom; yards to reach and carry each bunker and pond within 45 yd of the line; yards
+  to the green every 50; fairway width at the landing zone; strategy patterns if showing).
+  PNG for one hole, a multi‑page PDF for all (our own minimal PDF writer, JPEG pages).
+- **v0.7 Stats, presentation, labels** ✅ built 2026‑11‑12. Course stats (`model/stats.ts`):
+  acres per surface, greens (count, square feet, average), bunker count, yardage per tee
+  set — in the Info panel and File → Course stats… with CSV export. Presentation sheet:
+  title block, legend of the surfaces actually used, scale bar, north arrow. Text tool (A):
+  labels sized in yards, saved in the file, undoable, included in exports.
+- **v0.7 Also** ✅ Crisp shapes view option (`render/crisp.ts`): shapes drawn as smooth curves
+  at screen resolution from 200% zoom; paint stays pixels; exports are always pixels.
+  Installable web app: manifest, icons, and a service worker that caches only the editor's
+  own files (never map tiles, elevation or search). Help → Send feedback (GitHub issues)
+  and a status‑bar reminder that work lives in this browser until File → Save.
+  Bundled fictional sample course (File → Open sample course; `scripts/make-sample.ts`).
+- **Website** — the editor lives at `/linksketch/app/` inside the owner's personal site
+  (`site/`, `content/`); see docs/PROGRESS.md.
+- **Later** — Tauri desktop, iPad + Pencil, share links, wind/slope in strategy.
 
 ## 7. Monetization notes
 Free core editor; paid tier for satellite/terrain overlays, strategy mode, hi‑res

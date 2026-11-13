@@ -110,6 +110,31 @@ input[type='checkbox'] {
 }
 .menu-title {
   padding: 3px 7px;
+  /* It is a real button (keyboard reachable) but looks like a flat Paint menu title. */
+  box-shadow: none;
+  background: none;
+  min-height: 0;
+}
+.menu-title:active {
+  box-shadow: none;
+  padding: 3px 7px;
+}
+.menu-title:focus-visible,
+.menu-item:focus-visible {
+  outline: 1px dotted #000;
+  outline-offset: -2px;
+}
+.menu-item:focus {
+  background: var(--hl);
+  color: var(--hl-text);
+  outline: none;
+}
+.menu-item.disabled:focus {
+  background: none;
+  color: var(--shadow);
+}
+.dialog:focus {
+  outline: none;
 }
 .menu.open .menu-title {
   background: var(--hl);
@@ -781,4 +806,77 @@ select.num {
 }
 .players-table input[type='checkbox'] {
   width: auto;
+}
+
+/* ------------------------------------------------ tee sets */
+.tee-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border: 1px solid #000;
+  vertical-align: -1px;
+}
+.scorecard th.tee-col {
+  cursor: default;
+  white-space: nowrap;
+}
+.scorecard th.tee-col.active {
+  text-decoration: underline;
+}
+.kv.tee-row {
+  align-items: center;
+  gap: 4px;
+}
+.kv.tee-row > span {
+  flex: 1;
+}
+.kv.tee-row.active > span {
+  font-weight: bold;
+}
+.tee-sets-table td {
+  padding: 2px 4px 2px 0;
+}
+.tee-sets-table input[type='color'] {
+  width: 30px;
+  height: 22px;
+  padding: 0;
+}
+
+/* ------------------------------------------------ stats, save reminder */
+details.stats {
+  margin-top: 4px;
+}
+details.stats summary {
+  cursor: default;
+  font-weight: bold;
+  padding: 2px 0;
+}
+.stats-table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 8px;
+}
+.stats-table td,
+.stats-table th {
+  padding: 2px 10px 2px 0;
+  text-align: left;
+  vertical-align: top;
+}
+.stats-table td:last-child {
+  font-weight: bold;
+}
+#statusbar .save-note {
+  box-shadow: none;
+  background: none;
+  min-height: 0;
+  padding: 0 6px;
+  white-space: nowrap;
+  color: #5a3d00;
+}
+#statusbar .save-note.saved {
+  color: #1b5e20;
+}
+#statusbar .save-note:focus-visible {
+  outline: 1px dotted #000;
 }

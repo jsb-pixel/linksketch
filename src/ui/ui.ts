@@ -1,5 +1,7 @@
 import { dist, polygonArea, pathLength } from '../geom/geom';
 import { holeYards, playsLike } from '../editor/holes';
+import { hasOwnTee, teeTotals, yardsFor } from '../model/tees';
+import { courseStats, type CourseStats } from '../model/stats';
 import { minMax, type BrushMode } from '../terrain/terrain';
 import { MAP_SOURCES } from '../editor/maptiles';
 import { formatLatLon, worldToLatLon } from '../geo/geo';
@@ -38,6 +40,7 @@ const TOOL_ORDER: ToolId[] = [
   'ruler',
   'hole',
   'terrain',
+  'text',
   'select',
   'freehand',
   'polygon',
@@ -66,58 +69,118 @@ export interface MenuItem {
   separator?: boolean;
 }
 
-export function buildMenuBar(menus: { title: string; items: MenuItem[] }[]): void {
+export interface Menu {
+  title: string;
+  /** A function is evaluated each time the menu opens (for lists that change, like players). */
+  items: MenuItem[] | (() => MenuItem[]);
+}
+
+export function buildMenuBar(menus: Menu[]): void {
   const bar = $('#menubar');
-  let open: HTMLElement | null = null;
-  const close = () => {
-    open?.classList.remove('open');
+  bar.setAttribute('role', 'menubar');
+  const wraps: { wrap: HTMLElement; title: HTMLButtonElement; list: HTMLElement; render: () => void }[] = [];
+  let open: (typeof wraps)[number] | null = null;
+  const close = (refocus = false) => {
+    if (!open) return;
+    open.wrap.classList.remove('open');
+    open.title.setAttribute('aria-expanded', 'false');
+    if (refocus) open.title.focus();
     open = null;
   };
+  const show = (w: (typeof wraps)[number], focusFirst = false) => {
+    if (open && open !== w) close();
+    w.render();
+    w.wrap.classList.add('open');
+    w.title.setAttribute('aria-expanded', 'true');
+    open = w;
+    if (focusFirst) rows(w)[0]?.focus();
+  };
+  const rows = (w: (typeof wraps)[number]) => [...w.list.querySelectorAll<HTMLElement>('.menu-item:not(.disabled)')];
+
   for (const m of menus) {
-    const title = h('div', { class: 'menu-title', textContent: m.title });
+    const title = h('button', { class: 'menu-title', textContent: m.title, type: 'button' });
+    title.setAttribute('role', 'menuitem');
+    title.setAttribute('aria-haspopup', 'true');
+    title.setAttribute('aria-expanded', 'false');
     const list = h('div', { class: 'menu-list' });
+    list.setAttribute('role', 'menu');
+    list.setAttribute('aria-label', m.title);
     const wrap = h('div', { class: 'menu' }, title, list);
     const render = () => {
+      const items = typeof m.items === 'function' ? m.items() : m.items;
       list.replaceChildren(
-        ...m.items.map((it) => {
+        ...items.map((it) => {
           if (it.separator) return h('hr');
           const enabled = it.enabled ? it.enabled() : true;
+          const checked = it.checked?.();
           const row = h(
             'div',
-            { class: `menu-item${enabled ? '' : ' disabled'}` },
-            h('span', { class: 'check', textContent: it.checked?.() ? '✓' : '' }),
+            { class: `menu-item${enabled ? '' : ' disabled'}`, tabIndex: -1 },
+            h('span', { class: 'check', textContent: checked ? '✓' : '' }),
             h('span', { class: 'label', textContent: it.label }),
             h('span', { class: 'shortcut', textContent: it.shortcut ?? '' }),
           );
-          row.addEventListener('pointerup', () => {
+          row.setAttribute('role', it.checked ? 'menuitemcheckbox' : 'menuitem');
+          if (it.checked) row.setAttribute('aria-checked', String(!!checked));
+          if (!enabled) row.setAttribute('aria-disabled', 'true');
+          const run = (fromKeyboard = false) => {
             if (!enabled) return;
-            close();
+            // Keyboard users go back to the menu title, so a dialog can return focus there.
+            close(fromKeyboard);
             it.action?.();
+          };
+          row.addEventListener('pointerup', () => run());
+          row.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              run(true);
+            }
           });
           return row;
         }),
       );
     };
+    const entry = { wrap, title, list, render };
+    wraps.push(entry);
     title.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
-      if (open === wrap) return close();
-      close();
-      render();
-      wrap.classList.add('open');
-      open = wrap;
+      if (open === entry) return close();
+      show(entry);
     });
     title.addEventListener('pointerenter', () => {
-      if (open && open !== wrap) {
-        close();
-        render();
-        wrap.classList.add('open');
-        open = wrap;
+      if (open && open !== entry) show(entry);
+    });
+    // Keyboard: Enter/Space/↓ opens, ←/→ moves between menus, ↑/↓ between items, Esc closes.
+    wrap.addEventListener('keydown', (e) => {
+      const i = wraps.indexOf(entry);
+      const onTitle = document.activeElement === title;
+      const list = rows(entry);
+      const at = list.indexOf(document.activeElement as HTMLElement);
+      let handled = true;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        const next = wraps[(i + (e.key === 'ArrowRight' ? 1 : wraps.length - 1)) % wraps.length];
+        if (open) show(next, true);
+        else next.title.focus();
+      } else if (onTitle && (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown')) show(entry, true);
+      else if (open === entry && e.key === 'ArrowDown') list[(at + 1) % list.length]?.focus();
+      else if (open === entry && e.key === 'ArrowUp') list[(at - 1 + list.length) % list.length]?.focus();
+      else if (open === entry && e.key === 'Home') list[0]?.focus();
+      else if (open === entry && e.key === 'End') list[list.length - 1]?.focus();
+      else if (open && e.key === 'Escape') close(true);
+      else handled = false;
+      if (handled) {
+        e.preventDefault();
+        e.stopPropagation();
       }
     });
     bar.append(wrap);
   }
   document.addEventListener('pointerdown', (e) => {
-    if (open && !open.contains(e.target as Node)) close();
+    if (open && !open.wrap.contains(e.target as Node)) close();
+  });
+  bar.addEventListener('focusout', (e) => {
+    if (open && !bar.contains(e.relatedTarget as Node | null) && e.relatedTarget) close();
   });
 }
 
@@ -134,11 +197,17 @@ export function buildToolbox(ed: Editor): void {
       title: `${t.name} (${t.key.toUpperCase()})`,
       innerHTML: TOOL_ICONS[id],
     });
+    b.setAttribute('aria-label', t.name);
+    b.dataset.tool = id;
     b.addEventListener('click', () => ed.setTool(id));
     buttons.set(id, b);
     box.append(b);
   }
-  const sync = () => buttons.forEach((b, id) => b.classList.toggle('active', ed.tool.id === id));
+  const sync = () =>
+    buttons.forEach((b, id) => {
+      b.classList.toggle('active', ed.tool.id === id);
+      b.setAttribute('aria-pressed', String(ed.tool.id === id));
+    });
   ed.on('tool', sync);
   sync();
 
@@ -405,7 +474,8 @@ export function buildLayersPanel(ed: Editor): void {
           e.stopPropagation();
           l.visible = !l.visible;
           ed.invalidate();
-          if (!l.visible && ed.selection?.layerId === l.id) ed.select(null);
+          if (!l.visible) ed.dropSelectionOnLayer(l.id);
+          ed.emit('history'); // saved with the course (not an undo step, like Paint's view options)
           render();
         });
         const lock = h('button', {
@@ -416,7 +486,8 @@ export function buildLayersPanel(ed: Editor): void {
         lock.addEventListener('click', (e) => {
           e.stopPropagation();
           l.locked = !l.locked;
-          if (l.locked && ed.selection?.layerId === l.id) ed.select(null);
+          if (l.locked) ed.dropSelectionOnLayer(l.id);
+          ed.emit('history');
           render();
         });
         let outline: HTMLElement | string = '';
@@ -428,9 +499,11 @@ export function buildLayersPanel(ed: Editor): void {
           });
           ob.addEventListener('click', (e) => {
             e.stopPropagation();
+            ed.history.begin(l.outline ? 'Outlines off' : 'Outlines on');
+            ed.history.snapshotMeta();
             l.outline = !l.outline;
+            ed.history.commit();
             ed.invalidate();
-            ed.emit('history');
             render();
           });
           outline = ob;
@@ -484,9 +557,12 @@ export function buildLayersPanel(ed: Editor): void {
         });
         row.addEventListener('dblclick', () => {
           const n = prompt('Layer name', l.name);
-          if (n && n.trim()) {
-            l.name = n.trim();
-            render();
+          if (n && n.trim() && n.trim() !== l.name) {
+            ed.history.begin('Rename layer');
+            ed.history.snapshotMeta();
+            l.name = n.trim().slice(0, 60);
+            ed.history.commit();
+            ed.emit('doc');
           }
         });
         return row;
@@ -507,12 +583,71 @@ export function buildInfoPanel(ed: Editor): void {
 
   const row = (k: string, v: string) => h('div', { class: 'kv' }, h('span', { textContent: k }), h('b', { textContent: v }));
 
+  // Course stats: worked out only while the section is open, and only when the drawing changed.
+  let statsOpen = false;
+  let statsCache: { doc: unknown; rev: number; holes: unknown; sets: unknown; stats: CourseStats } | null = null;
+  const statsSection = (): HTMLElement => {
+    const det = h('details', { class: 'stats' });
+    det.open = statsOpen;
+    det.append(h('summary', { textContent: 'Course stats' }));
+    const fill = () => {
+      const c = statsCache;
+      if (!c || c.doc !== ed.doc || c.rev !== ed.revision || c.holes !== ed.doc.holes || c.sets !== ed.doc.teeSets)
+        statsCache = { doc: ed.doc, rev: ed.revision, holes: ed.doc.holes, sets: ed.doc.teeSets, stats: courseStats(ed.doc) };
+      const s = statsCache!.stats;
+      const rows: Node[] = [];
+      if (s.holes) {
+        rows.push(row('Holes', `${s.holes} · par ${s.par}`));
+        for (const y of s.yardage) rows.push(row(s.yardage.length > 1 || ed.doc.teeSets?.length ? `${y.name} tees` : 'Yardage', `${y.yards.toLocaleString()} yd`));
+      }
+      rows.push(row('Greens', s.greenCount ? `${s.greenCount} · ${Math.round(s.greensSqFt).toLocaleString()} sq ft` : 'none'));
+      rows.push(row('Bunkers', String(s.bunkerCount)));
+      for (const x of s.surfaces.slice(0, 8)) rows.push(row(x.name, x.acres >= 0.1 ? `${x.acres.toFixed(1)} ac` : formatArea(x.sqYd)));
+      const more = h('button', { class: 'small', textContent: 'All stats & export…' });
+      more.addEventListener('click', () => window.dispatchEvent(new Event('fairway:stats')));
+      rows.push(h('div', { class: 'btn-row' }, more));
+      det.append(...rows);
+    };
+    if (statsOpen) fill();
+    det.addEventListener('toggle', () => {
+      if (det.open === statsOpen) return;
+      statsOpen = det.open;
+      if (statsOpen && det.children.length === 1) fill();
+    });
+    return det;
+  };
+
   const render = () => {
     const parts: Node[] = [];
     const hole = ed.selectedHole();
     if (hole) {
       parts.push(h('div', { class: 'info-head', textContent: `Hole ${hole.number}` }));
-      parts.push(row('Yardage', `${holeYards(hole)} yd`));
+      const sets = ed.teeSets;
+      if (sets.length < 2) parts.push(row('Yardage', `${holeYards(hole)} yd`));
+      else {
+        // One line per tee set: yardage, and a button to place or remove its tee.
+        for (const set of sets) {
+          const dot = h('span', { class: 'tee-dot' });
+          dot.style.background = set.color;
+          const line = h('div', { class: `kv tee-row${set.id === ed.activeTeeSetId ? ' active' : ''}` }, h('span', {}, dot, set.name), h('b', { textContent: `${yardsFor(hole, set.id, sets)} yd` }));
+          if (set !== sets[0]) {
+            const own = hasOwnTee(hole, set.id, sets);
+            const place = h('button', { class: 'small', textContent: own ? 'Move' : 'Place', title: `Click, then click on the course where the ${set.name} tee goes` });
+            place.addEventListener('click', () => {
+              ed.setTool('hole');
+              (ed.tool as { placeTee?: (holeId: string, setId: string) => void }).placeTee?.(hole.id, set.id);
+            });
+            line.append(place);
+            if (own) {
+              const rm = h('button', { class: 'small', textContent: '✕', title: `Remove the ${set.name} tee from this hole (it then plays from the ${sets[0].name} tee)` });
+              rm.setAttribute('aria-label', `Remove the ${set.name} tee`);
+              rm.addEventListener('click', () => ed.setTee(hole.id, set.id, null));
+              line.append(rm);
+            }
+          }
+          parts.push(line);
+        }
+      }
       if (ed.doc.terrain) {
         const tee = ed.elevationAt(hole.points[0])!;
         const green = ed.elevationAt(hole.points[hole.points.length - 1])!;
@@ -699,17 +834,30 @@ export function buildInfoPanel(ed: Editor): void {
       clr.addEventListener('click', () => ed.clearRuler());
       parts.push(h('div', { class: 'btn-row' }, clr));
     }
+    const label = ed.tool.id === 'text' ? ed.selectedLabel() : null;
+    if (label) {
+      parts.push(h('div', { class: 'info-head', textContent: 'Text label' }));
+      parts.push(row('Text', label.text));
+      parts.push(row('Size', `${label.size} yd tall`));
+      const edit = h('button', { class: 'small', textContent: 'Edit…' });
+      edit.addEventListener('click', () => (ed.tool as { editDialog?: (id: string, at: { x: number; y: number }) => void }).editDialog?.(label.id, label));
+      const del = h('button', { class: 'small', textContent: 'Delete' });
+      del.addEventListener('click', () => ed.deleteLabel(label.id));
+      parts.push(h('div', { class: 'btn-row' }, edit, del));
+    }
     const d = ed.doc;
     parts.push(h('div', { class: 'info-head', textContent: 'Course' }));
     parts.push(row('Name', d.name));
     parts.push(row('Area', `${Math.round(d.width * d.yardsPerPixel)} × ${Math.round(d.height * d.yardsPerPixel)} yd`));
     parts.push(row('1 pixel', `${d.yardsPerPixel} yd`));
+    parts.push(statsSection());
     body.replaceChildren(...parts);
   };
   ed.on('selection', render);
   ed.on('doc', render);
   ed.on('tool', render);
   ed.on('holes', render);
+  ed.on('history', () => statsOpen && render());
   // ruler updates arrive as 'status' (frequent) — only re-render when a ruler exists
   ed.on('status', () => {
     if (ed.ruler.points.length || body.querySelector('.info-head')?.textContent === 'Measurement') render();
@@ -730,16 +878,32 @@ export function buildScorecard(ed: Editor): void {
       body.replaceChildren(h('div', { class: 'tip', textContent: 'No holes yet. Pick the Hole tool (O): click the tee, any aim points, then double‑click the green.' }));
       return;
     }
+    const sets = ed.teeSets;
+    const named = sets.length > 1 || !!ed.doc.teeSets?.length;
     const table = h('table');
-    table.append(h('tr', {}, h('th', { textContent: 'Hole' }), h('th', { textContent: 'Par' }), h('th', { textContent: 'Yards' })));
-    const total = (hs: typeof holes, label: string) =>
-      h(
+    const head = h('tr', {}, h('th', { textContent: 'Hole' }), h('th', { textContent: 'Par' }));
+    for (const set of sets) {
+      // One yardage column per tee set; click a heading to play from that set.
+      const th = h('th', { class: `tee-col${set.id === ed.activeTeeSetId && sets.length > 1 ? ' active' : ''}`, title: named ? `${set.name} tees — click to play from them` : 'Yards' });
+      if (named) {
+        const dot = h('span', { class: 'tee-dot' });
+        dot.style.background = set.color;
+        th.append(dot, set.name);
+        th.addEventListener('click', () => ed.setTeeSet(set.id));
+      } else th.textContent = 'Yards';
+      head.append(th);
+    }
+    table.append(head);
+    const totals = (hs: typeof holes, label: string, pick: 'out' | 'in' | 'total') => {
+      const t = teeTotals(holes, sets);
+      return h(
         'tr',
         { class: 'total' },
         h('td', { textContent: label }),
         h('td', { textContent: String(hs.reduce((n, x) => n + x.par, 0)) }),
-        h('td', { textContent: hs.reduce((n, x) => n + holeYards(x), 0).toLocaleString() }),
+        ...t.map((x) => h('td', { textContent: x[pick].toLocaleString() })),
       );
+    };
     const front = holes.filter((x) => x.number <= 9);
     const back = holes.filter((x) => x.number > 9);
     const split = front.length > 0 && back.length > 0;
@@ -749,7 +913,7 @@ export function buildScorecard(ed: Editor): void {
         { class: x.id === ed.selectedHoleId ? 'sel' : '' },
         h('td', { textContent: String(x.number) }),
         h('td', { textContent: String(x.par) }),
-        h('td', { textContent: holeYards(x).toLocaleString() }),
+        ...sets.map((set) => h('td', { textContent: yardsFor(x, set.id, sets).toLocaleString() })),
       );
       tr.addEventListener('click', () => {
         ed.selectHole(x.id);
@@ -757,10 +921,10 @@ export function buildScorecard(ed: Editor): void {
         ed.centerOn(mid);
       });
       table.append(tr);
-      if (split && x === front[front.length - 1]) table.append(total(front, 'Out'));
+      if (split && x === front[front.length - 1]) table.append(totals(front, 'Out', 'out'));
     }
-    if (split) table.append(total(back, 'In'));
-    table.append(total(holes, 'Total'));
+    if (split) table.append(totals(back, 'In', 'in'));
+    table.append(totals(holes, 'Total', 'total'));
     body.replaceChildren(table);
   };
   ed.on('holes', render);
@@ -784,7 +948,10 @@ export function buildStatusBar(ed: Editor): void {
     rot.blur();
   });
   const rotCell = h('label', { class: 'cell rot-cell', title: 'View rotation' }, '↻ ', rot, '°');
-  bar.append(hint, layer, pos, rotCell, zoom);
+  // A standing reminder that the browser copy is not a backup.
+  const note = h('button', { class: 'cell save-note', id: 'save-note', type: 'button', title: 'Where is my work saved? Click for details.' });
+  note.addEventListener('click', () => window.dispatchEvent(new Event('fairway:storage')));
+  bar.append(hint, note, layer, pos, rotCell, zoom);
   const render = () => {
     hint.textContent = ed.message || ed.tool.hint;
     const hv = ed.hover;
@@ -810,39 +977,80 @@ export function buildStatusBar(ed: Editor): void {
 // =====================================================================
 // Dialogs
 // =====================================================================
+let dialogSeq = 0;
+
+/**
+ * A modal dialog. It is announced as a dialog, keeps Tab inside itself, closes on
+ * Escape wherever the focus is, and gives the focus back when it closes.
+ */
 export function dialog(title: string, content: HTMLElement, buttons: { label: string; primary?: boolean; onClick: () => boolean | void }[]): () => void {
   const overlay = h('div', { class: 'modal-overlay' });
   const btnRow = h('div', { class: 'dialog-buttons' });
+  const titleId = `dialog-title-${++dialogSeq}`;
   const win = h(
     'div',
     { class: 'window dialog' },
-    h('div', { class: 'title-bar', textContent: title }),
+    h('div', { class: 'title-bar', textContent: title, id: titleId }),
     h('div', { class: 'dialog-body' }, content),
     btnRow,
   );
-  const close = () => overlay.remove();
+  win.setAttribute('role', 'dialog');
+  win.setAttribute('aria-modal', 'true');
+  win.setAttribute('aria-labelledby', titleId);
+  win.tabIndex = -1;
+  const returnTo = document.activeElement as HTMLElement | null;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+    if (returnTo?.isConnected) returnTo.focus();
+  };
   for (const b of buttons) {
-    const el = h('button', { textContent: b.label, class: b.primary ? 'primary' : '' });
+    const el = h('button', { textContent: b.label, class: b.primary ? 'primary' : '', type: 'button' });
     el.addEventListener('click', () => {
       if (b.onClick() !== false) close();
     });
     btnRow.append(el);
   }
   overlay.append(win);
-  overlay.addEventListener('keydown', (e) => {
+  const focusable = () =>
+    [...win.querySelectorAll<HTMLElement>('input, select, textarea, button, [tabindex]:not([tabindex="-1"])')].filter((el) => !(el as HTMLButtonElement).disabled && el.offsetParent !== null);
+  // On the document, so Escape works even if the focus has left the dialog.
+  const onKey = (e: KeyboardEvent) => {
+    // Only the top‑most dialog reacts.
+    if (overlay !== document.querySelector('.modal-overlay:last-of-type')) return;
+    const inside = win.contains(e.target as Node);
     if (e.key === 'Escape') {
-      const cancel = buttons.find((b) => /cancel|close/i.test(b.label));
-      cancel?.onClick();
+      e.preventDefault();
+      e.stopPropagation();
+      buttons.find((b) => /cancel|close/i.test(b.label))?.onClick();
       close();
-    }
-    if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'BUTTON') {
+    } else if (e.key === 'Enter' && inside && !['BUTTON', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
       const primary = buttons.find((b) => b.primary);
+      e.stopPropagation();
       if (primary && primary.onClick() !== false) close();
-    }
-    e.stopPropagation();
-  });
+    } else if (e.key === 'Tab') {
+      const list = focusable();
+      if (!list.length) return;
+      const first = list[0];
+      const last = list[list.length - 1];
+      if (!inside) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    } else if (inside) e.stopPropagation();
+  };
+  document.addEventListener('keydown', onKey);
   document.body.append(overlay);
-  (win.querySelector('input, select, button') as HTMLElement | null)?.focus();
+  ((win.querySelector('.dialog-body input, .dialog-body select, .dialog-body textarea') ?? btnRow.querySelector('button.primary') ?? win) as HTMLElement).focus();
   return close;
 }
 
@@ -861,7 +1069,7 @@ function strategySection(ed: Editor, hole: Hole): Node[] {
   cb.addEventListener('change', () => ed.setStrategy({ show: cb.checked }));
   parts.push(h('label', { class: 'opt' }, cb, 'Show landing patterns (S)'));
   const sel = h('select', { class: 'player-select' });
-  for (const p of ed.players) sel.append(h('option', { value: p.id, textContent: p.name, selected: p.id === ed.strategyPlayer }));
+  for (const p of ed.players) sel.append(h('option', { value: p.id, textContent: p.name, selected: p.id === ed.activeStrategyPlayer }));
   sel.append(h('option', { value: 'all', textContent: 'All players', selected: ed.strategyPlayer === 'all' }));
   sel.addEventListener('change', () => ed.setStrategy({ player: sel.value, show: true }));
   const edit = h('button', { class: 'small', textContent: 'Players…', title: 'Distances and accuracy for each player' });
